@@ -1,5 +1,5 @@
 # =========================================================================
-# CONVERSIÓN DE KML A GEOJSON (SOPORTE GEOESPACIAL COMPLETO)
+# CONVERSIÓN DE KML A GEOJSON 
 # =========================================================================
 import geopandas as gpd
 import fiona
