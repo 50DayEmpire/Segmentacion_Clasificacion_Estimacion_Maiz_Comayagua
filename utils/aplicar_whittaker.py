@@ -31,28 +31,29 @@ def aplicar_whittaker_series(
     for nombre_indice, df_crudo in diccionario_dfs.items():
         print(f"📈 Suavizando serie temporal para: {nombre_indice}...")
         
-        # Clonamos la estructura para no sobreescribir el DataFrame original
         df_resultado = df_crudo.copy()
-        num_filas = len(df_crudo.index)
         
-        # Inicializar el objeto Whittaker (de la librería whittaker-eilers)
-        whittaker = WhittakerSmoother(lmbda=lambda_param, order=orden, data_length=num_filas,weights=pesos)
-        
-        # Iterar parcela por parcela (columna por columna)
+        # Iterar parcela por parcela
         for parcela in df_crudo.columns:
             serie_valores = df_crudo[parcela].values
             
-            # 📌 CLAVE: Whittaker necesita una matriz de pesos (w).
-            # 1.0 para datos reales del satélite, 0.0 para nubes o días vacíos (NaN)
-            pesos = np.where(np.isnan(serie_valores), 0.0, 1.0)
+            # Generar pesos (0 para NaN, 1 para válidos)
+            pesos = np.where(np.isnan(serie_valores), 0.0, 1.0).tolist()
+            valores_preparados = np.nan_to_num(serie_valores, nan=0.0).tolist()
             
-            # Reemplazar temporalmente los NaN por 0.0 solo para que el input numérico sea válido
-            valores_preparados = np.nan_to_num(serie_valores, nan=0.0)
+            # 💡 CORRECCIÓN: Se inicializa un suavizador por cada combinación única 
+            # de serie/pesos de la parcela.
+            whittaker = WhittakerSmoother(
+                lmbda=lambda_param, 
+                order=orden, 
+                data_length=len(valores_preparados),
+                x_input=None,       # Al ser equiespaciado diario es None
+                weights=pesos       # ¡Aquí van los pesos de la parcela!
+            )
             
-            # Ejecutar el algoritmo
+            # El método smooth() no lleva argumentos adicionales
             valores_suaves = whittaker.smooth(valores_preparados)
             
-            # Guardar la serie diaria resultante en nuestro DataFrame
             df_resultado[parcela] = valores_suaves
             
         dict_suavizado[nombre_indice] = df_resultado
