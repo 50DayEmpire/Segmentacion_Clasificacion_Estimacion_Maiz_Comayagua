@@ -1,5 +1,4 @@
 import os
-import xarray as xr
 
 def descargar_datacube(datacube, ruta_netcdf, formato="NetCDF"):
     """
