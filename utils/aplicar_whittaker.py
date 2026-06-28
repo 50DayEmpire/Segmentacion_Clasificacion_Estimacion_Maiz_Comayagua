@@ -36,7 +36,7 @@ def aplicar_whittaker_series(
         num_filas = len(df_crudo.index)
         
         # Inicializar el objeto Whittaker (de la librería whittaker-eilers)
-        whittaker = WhittakerSmoother(lmbda=lambda_param, order=orden, data_length=num_filas)
+        whittaker = WhittakerSmoother(lmbda=lambda_param, order=orden, data_length=num_filas,weights=pesos)
         
         # Iterar parcela por parcela (columna por columna)
         for parcela in df_crudo.columns:
@@ -50,7 +50,7 @@ def aplicar_whittaker_series(
             valores_preparados = np.nan_to_num(serie_valores, nan=0.0)
             
             # Ejecutar el algoritmo
-            valores_suaves = whittaker.smooth(valores_preparados, weights=pesos)
+            valores_suaves = whittaker.smooth(valores_preparados)
             
             # Guardar la serie diaria resultante en nuestro DataFrame
             df_resultado[parcela] = valores_suaves
