@@ -1,0 +1,81 @@
+# ── Entorno virtual ────────────────────────────────────────────────────────────
+.venv/
+venv/
+env/
+
+# ── uv ────────────────────────────────────────────────────────────────────────
+# uv.lock se versionea intencionalmente (reproducibilidad del entorno)
+# descomenta la siguiente línea solo si prefieres no versionarlo
+# uv.lock
+
+# ── Python ────────────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.egg-info/
+dist/
+build/
+*.egg
+.eggs/
+
+# ── Datos y modelos entrenados ─────────────────────────────────────────────────
+data/
+*.gpkg
+*.geojson
+*.shp
+*.shx
+*.dbf
+*.prj
+*.cpg
+*.tif
+*.tiff
+*.nc
+*.h5
+*.hdf5
+*.pkl
+*.joblib
+*.npy
+*.npz
+
+# ── Notebooks ─────────────────────────────────────────────────────────────────
+.ipynb_checkpoints/
+*.ipynb
+
+# ── Variables de entorno y secretos ───────────────────────────────────────────
+.env
+.env.*
+secrets.toml
+# NOTA: .streamlit/secrets.toml nunca debe versionarse
+.streamlit/secrets.toml
+
+# ── Caché de Streamlit ────────────────────────────────────────────────────────
+.streamlit/cache/
+
+# ── IDEs y editores ────────────────────────────────────────────────────────────
+.vscode/
+.idea/
+*.suo
+*.user
+*.swp
+*.swo
+*~
+
+# ── Sistema operativo ─────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ── Logs y temporales ─────────────────────────────────────────────────────────
+*.log
+*.tmp
+*.bak
+tmp/
+temp/
+
+# ── Cobertura y tests ─────────────────────────────────────────────────────────
+.coverage
+htmlcov/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/

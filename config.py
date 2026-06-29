@@ -1,0 +1,67 @@
+# config.py — Constantes globales del observatorio
+from pathlib import Path
+
+# ── Rutas ──────────────────────────────────────────────────────────────────────
+ROOT      = Path(__file__).parent
+GPKG_PATH = ROOT / "data" / "pipeline.gpkg"
+
+# ── Capas del GeoPackage ───────────────────────────────────────────────────────
+LAYERS_GPKG = {
+    "parcelas":    "parcelas",
+    "ciclos":      "ciclos",
+    "gpp_diario":  "gpp_diario",
+    "rendimiento": "rendimiento",
+    "serie_evi":   "serie_evi",
+    "serie_lswi":  "serie_lswi",
+}
+
+# ── Ciclos de siembra ──────────────────────────────────────────────────────────
+CICLOS = {
+    "Primera (may–oct)":  "primera",
+    "Postrera (ago–ene)": "postrera",
+}
+
+# ── Ventanas de predicción ─────────────────────────────────────────────────────
+VENTANAS = ["T1", "T2", "T3"]
+
+# ── Colores por ciclo ──────────────────────────────────────────────────────────
+COLOR_PRIMERA  = "#2ecc71"   # verde
+COLOR_POSTRERA = "#e67e22"   # naranja
+
+COLORES_CICLO = {
+    "primera":  COLOR_PRIMERA,
+    "postrera": COLOR_POSTRERA,
+}
+
+# ── Colores por cultivo clasificado ────────────────────────────────────────────
+COLORES_CULTIVO = {
+    "maiz":       "#f1c40f",
+    "sorgo":      "#e74c3c",
+    "frijol":     "#8e44ad",
+    "pasto":      "#27ae60",
+    "otro":       "#95a5a6",
+    "sin_datos":  "#2c3e50",
+}
+
+# ── Escala de rendimiento (qq/ha) ──────────────────────────────────────────────
+RENDIMIENTO_MIN_QQ_HA = 0
+RENDIMIENTO_MAX_QQ_HA = 120
+
+# ── Parámetros del mapa Folium ─────────────────────────────────────────────────
+MAPA_CENTRO_LAT  = 14.453    # Valle de Comayagua
+MAPA_CENTRO_LON  = -87.637
+MAPA_ZOOM_INICIO = 12
+MAPA_TILES       = "CartoDB dark_matter"
+
+# ── CRS ───────────────────────────────────────────────────────────────────────
+CRS_METRICO    = "EPSG:32616"
+CRS_GEOGRAFICO = "EPSG:4326"
+
+# ── Referencia SAG/CAN (qq/ha por ciclo) ──────────────────────────────────────
+RENDIMIENTO_REF = {
+    "primera":  45.0,
+    "postrera": 38.0,
+}
+
+# ── Métricas de validación a mostrar ──────────────────────────────────────────
+METRICAS_VALIDACION = ["RMSE", "MAE", "MAPE", "R²"]
