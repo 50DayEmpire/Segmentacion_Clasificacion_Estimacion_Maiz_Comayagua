@@ -18,12 +18,24 @@ import geopandas as gpd
 
 from utils.dict_a_dataframe import openeo_dict_to_dataframes
 
+# ── Valores por defecto del proceso to_scl_dilation_mask ──────────────────────
+# Documentados aquí para que sean fácilmente referenciables y para que
+# config_cloud_mask solo tenga que declarar lo que difiere del default.
+_CLOUD_MASK_DEFAULTS: dict = {
+    "kernel1_size":        21,    # px — primera dilatación (clases mask1_values)
+    "kernel2_size":        59,    # px — segunda dilatación (clases mask2_values)
+    "mask1_values":        [2, 4, 5, 6, 7],    # SCL: nieve, vegetación, suelo, agua, nubes bajas
+    "mask2_values":        [3, 8, 9, 10, 11],  # SCL: sombras, nubes medias/altas, cirrus
+    "erosion_kernel_size": 3,     # px — erosión para limpiar bordes de máscara
+}
+
 
 def obtener_datacube_indices_crudo(
     connection: openeo.Connection,
     geojson_openeo: dict,
     fecha_inicio: str,
     fecha_fin: str,
+    config_cloud_mask: dict | None = None,
 ) -> dict:
     """
     Descarga series temporales de EVI y LSWI para un conjunto de parcelas
@@ -41,24 +53,58 @@ def obtener_datacube_indices_crudo(
     connection : openeo.Connection
         Conexión activa y autenticada al backend CDSE de openEO.
     geojson_openeo : dict
-        GeoJSON (dict) con las geometrías de las parcelas en EPSG:4326,
-        en el formato que acepta openEO (FeatureCollection o Geometry).
+        GeoJSON con las geometrías de las parcelas en EPSG:4326.
     fecha_inicio : str
         Fecha de inicio del ciclo en formato ISO "YYYY-MM-DD".
         Ejemplo: "2025-05-01" para el ciclo de primera.
     fecha_fin : str
         Fecha de fin del ciclo en formato ISO "YYYY-MM-DD".
         Ejemplo: "2025-10-30" para el ciclo de primera.
+    config_cloud_mask : dict | None
+        Parámetros opcionales para ``to_scl_dilation_mask``.
+        Cualquier clave presente sobreescribe el valor por defecto;
+        las claves ausentes conservan los valores de ``_CLOUD_MASK_DEFAULTS``.
+
+        Claves disponibles:
+
+        =====================  =======  ==========================================
+        Clave                  Default  Descripción
+        =====================  =======  ==========================================
+        kernel1_size           21       Tamaño del kernel (px) de la primera
+                                        dilatación, aplicada sobre mask1_values.
+        kernel2_size           59       Tamaño del kernel (px) de la segunda
+                                        dilatación, aplicada sobre mask2_values.
+        mask1_values           [2,4,    Clases SCL incluidas en la primera
+                               5,6,7]   máscara (nubes densas, vegetación,
+                                        suelo desnudo, agua, nubes bajas).
+        mask2_values           [3,8,    Clases SCL incluidas en la segunda
+                               9,10,11] máscara (sombras de nubes, nubes
+                                        medias/altas, cirrus).
+        erosion_kernel_size    3        Tamaño del kernel (px) de erosión para
+                                        limpiar bordes de la máscara dilatada.
+        =====================  =======  ==========================================
+
+        Ejemplo — máscara más agresiva para escenas muy nubosas::
+
+            config_cloud_mask = {
+                "kernel1_size": 31,
+                "kernel2_size": 81,
+                "erosion_kernel_size": 5,
+            }
+
+        Ejemplo — excluir sombras de nubes de la segunda máscara::
+
+            config_cloud_mask = {
+                "mask2_values": [8, 9, 10, 11],  # sin clase 3 (sombras)
+            }
 
     Retorna
     -------
     dict[str, pd.DataFrame]
-        Diccionario con dos DataFrames:
-        - "EVI":  índice Enhanced Vegetation Index, DatetimeIndex x parcelas.
-        - "LSWI": índice Land Surface Water Index, DatetimeIndex x parcelas.
-        Los NaN corresponden a fechas con cobertura nubosa persistente;
-        no se rellenan fuera de esta función (el suavizador Whittaker
-        los gestiona en la etapa siguiente del pipeline).
+        ``{"EVI": DataFrame, "LSWI": DataFrame}``
+        DatetimeIndex x columnas de parcelas. Los NaN representan fechas
+        con cobertura nubosa persistente; se preservan para que el
+        suavizador Whittaker los gestione en la etapa siguiente del pipeline.
 
     Raises
     ------
@@ -69,8 +115,15 @@ def obtener_datacube_indices_crudo(
     """
     temp_ext = [fecha_inicio, fecha_fin]
 
+    # Mezclar defaults con overrides — config_cloud_mask tiene precedencia
+    cm: dict = {**_CLOUD_MASK_DEFAULTS, **(config_cloud_mask or {})}
+
     # ── 1. Máscara morfológica de nubes y sombras (SCL) ───────────────────────
-    print("☁️  1. Generando máscara de nubes (SCL dilation mask)...")
+    print(
+        f"☁️  1. Generando máscara de nubes (to_scl_dilation_mask) "
+        f"[k1={cm['kernel1_size']}, k2={cm['kernel2_size']}, "
+        f"erosion={cm['erosion_kernel_size']}]..."
+    )
     scl_cube = connection.load_collection(
         "SENTINEL2_L2A",
         spatial_extent=geojson_openeo,
@@ -78,15 +131,14 @@ def obtener_datacube_indices_crudo(
         bands=["SCL"],
     )
 
-    # Proceso nativo CDSE: dilata la máscara de nubes y erosiona bordes
     cloud_mask = scl_cube.process(
         "to_scl_dilation_mask",
         data=scl_cube,
-        kernel1_size=21,
-        kernel2_size=59,
-        mask1_values=[2, 4, 5, 6, 7],   # nieve, vegetación, suelo desnudo, agua, nubes bajas
-        mask2_values=[3, 8, 9, 10, 11],  # sombra de nubes, nubes medias/altas, cirrus
-        erosion_kernel_size=3,
+        kernel1_size=cm["kernel1_size"],
+        kernel2_size=cm["kernel2_size"],
+        mask1_values=cm["mask1_values"],
+        mask2_values=cm["mask2_values"],
+        erosion_kernel_size=cm["erosion_kernel_size"],
     )
 
     # ── 2. Cargar bandas ópticas necesarias para VPM ──────────────────────────
@@ -98,7 +150,6 @@ def obtener_datacube_indices_crudo(
         bands=["B02", "B04", "B08", "B11"],
     )
 
-    # Aplicar máscara de nubes y recorte estricto al polígono
     datacube_limpio = datacube_vpm.mask(cloud_mask)
     datacube_final  = datacube_limpio.mask_polygon(geojson_openeo)
 
@@ -113,19 +164,18 @@ def obtener_datacube_indices_crudo(
     print("🧮  4. Calculando EVI y LSWI...")
 
     def calcular_evi_openeo(data, context=None):
-        """EVI = 2.5 * (NIR - Red) / (NIR + 6·Red - 7.5·Blue + 1)"""
-        b08 = data.array_element(index=0)  # NIR   — posición 0 del filtro B08,B04,B02
-        b04 = data.array_element(index=1)  # Rojo  — posición 1
-        b02 = data.array_element(index=2)  # Azul  — posición 2
+        """EVI = 2.5 × (NIR − Red) / (NIR + 6·Red − 7.5·Blue + 1)"""
+        b08 = data.array_element(index=0)  # NIR  — orden de filter_bands: B08,B04,B02
+        b04 = data.array_element(index=1)  # Rojo
+        b02 = data.array_element(index=2)  # Azul
         return (2.5 * (b08 - b04)) / (b08 + (6.0 * b04) - (7.5 * b02) + 1.0)
 
     def calcular_lswi_openeo(data, context=None):
-        """LSWI = (NIR - SWIR) / (NIR + SWIR)"""
-        b08 = data.array_element(index=0)  # NIR  — posición 0 del filtro B08,B11
-        b11 = data.array_element(index=1)  # SWIR — posición 1
+        """LSWI = (NIR − SWIR) / (NIR + SWIR)"""
+        b08 = data.array_element(index=0)  # NIR  — orden de filter_bands: B08,B11
+        b11 = data.array_element(index=1)  # SWIR
         return (b08 - b11) / (b08 + b11)
 
-    # El orden de filter_bands debe coincidir con los índices de array_element
     evi = (
         datacube_interpolado
         .filter_bands(["B08", "B04", "B02"])
@@ -153,7 +203,6 @@ def obtener_datacube_indices_crudo(
     print("⏳  7. Descargando series temporales a memoria local...")
     diccionario_vpm = cube_promedios.execute()
 
-    # ── 6. Convertir a DataFrames ──────────────────────────────────────────────
     print("🗂️   8. Convirtiendo resultado a DataFrames pandas...")
     dfs_vpm = openeo_dict_to_dataframes(
         diccionario=diccionario_vpm,
@@ -165,10 +214,6 @@ def obtener_datacube_indices_crudo(
 
 
 if __name__ == "__main__":
-    # Ejemplo de uso desde terminal para el ciclo de primera 2025.
-    # Requiere credenciales CDSE configuradas:
-    #   openeo.authenticate_oidc() o variables de entorno OPENEO_AUTH_*
-
     import json
     from pathlib import Path
 
@@ -178,11 +223,17 @@ if __name__ == "__main__":
 
     conn = openeo.connect("https://openeo.dataspace.copernicus.eu").authenticate_oidc()
 
+    # Ejemplo con máscara personalizada para escena muy nubosa
     dfs = obtener_datacube_indices_crudo(
         connection=conn,
         geojson_openeo=geojson_dict,
         fecha_inicio="2025-05-01",
         fecha_fin="2025-10-30",
+        config_cloud_mask={
+            "kernel1_size": 31,
+            "kernel2_size": 81,
+            "erosion_kernel_size": 5,
+        },
     )
 
     for banda, df in dfs.items():
