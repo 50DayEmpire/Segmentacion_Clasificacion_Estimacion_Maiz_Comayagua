@@ -42,17 +42,24 @@ def aplicar_whittaker_series(
             valores_preparados = np.nan_to_num(serie_valores, nan=0.0).tolist()
             
             # 💡 CORRECCIÓN: Se inicializa un suavizador por cada combinación única 
-            # de serie/pesos de la parcela.
-            whittaker = WhittakerSmoother(
-                lmbda=lambda_param, 
-                order=orden, 
-                data_length=len(valores_preparados),
-                x_input=None,       # Al ser equiespaciado diario es None
-                weights=pesos       # ¡Aquí van los pesos de la parcela!
-            )
-            
-            # El método smooth() no lleva argumentos adicionales
-            valores_suaves = whittaker.smooth(valores_preparados)
+            # de serie/pesos de la parcela, validando que existan suficientes datos.
+            num_validos = np.sum(~np.isnan(serie_valores))
+            if num_validos < (orden + 1):
+                print(f"⚠️ La parcela '{parcela}' tiene menos de {orden + 1} observaciones válidas ({num_validos}). Se aplica interpolación lineal.")
+                valores_suaves = pd.Series(serie_valores).interpolate(method="linear", limit_direction="both").fillna(0.0).values
+            else:
+                try:
+                    whittaker = WhittakerSmoother(
+                        lmbda=lambda_param, 
+                        order=orden, 
+                        data_length=len(valores_preparados),
+                        x_input=None,       # Al ser equiespaciado diario es None
+                        weights=pesos       # ¡Aquí van los pesos de la parcela!
+                    )
+                    valores_suaves = whittaker.smooth(valores_preparados)
+                except Exception as e:
+                    print(f"⚠️ Whittaker falló para la parcela '{parcela}': {str(e)}. Se aplica interpolación lineal.")
+                    valores_suaves = pd.Series(serie_valores).interpolate(method="linear", limit_direction="both").fillna(0.0).values
             
             df_resultado[parcela] = valores_suaves
             

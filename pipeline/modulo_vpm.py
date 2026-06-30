@@ -43,14 +43,17 @@ def preprocesar_indices_vpm(
     # ── 1. Filtrado de valores atípicos ───────────────────────────────────────
     # Los valores de EVI y LSWI válidos se sitúan en [-1.0, 1.0].
     # Si un índice en una parcela y fecha está fuera de rango, se invalida (NaN)
-    # en ambos índices para esa misma fecha.
+    # en ambos índices para esa misma fecha (se considera contaminado).
+    # Se omiten los NaNs originales en la evaluación para evitar propagaciones erróneas.
     df_evi = dfs_vpm_crudos["EVI"].copy()
     df_lswi = dfs_vpm_crudos["LSWI"].copy()
 
-    mascara_valida = (df_evi >= -1.0) & (df_evi <= 1.0) & (df_lswi >= -1.0) & (df_lswi <= 1.0)
+    # es_atipico_evi = (df_evi < -1.0) | (df_evi > 1.0)
+    # es_atipico_lswi = (df_lswi < -1.0) | (df_lswi > 1.0)
+    # mascara_ruido = es_atipico_evi | es_atipico_lswi
 
-    df_evi = df_evi.where(mascara_valida, np.nan)
-    df_lswi = df_lswi.where(mascara_valida, np.nan)
+    # df_evi = df_evi.mask(mascara_ruido, np.nan)
+    # df_lswi = df_lswi.mask(mascara_ruido, np.nan)
 
     # ── 2. Reindexación Diaria ────────────────────────────────────────────────
     # Genera la cuadrícula temporal densa (frecuencia diaria 'D')
