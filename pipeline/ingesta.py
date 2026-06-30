@@ -217,7 +217,7 @@ def obtener_datacube_indices_crudo(
 
 def _convertir_temperatura(val_raw: float | int | str) -> float:
     """
-    AgERA5 entrega temperatura ×100 en Kelvin → convertir a °C.
+    AgERA5 entrega temperatura x100 en Kelvin → convertir a °C.
     """
     t_kelvin = float(val_raw) / 100.0 if float(val_raw) > 1000.0 else float(val_raw)
     return t_kelvin - 273.15

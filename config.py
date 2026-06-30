@@ -6,6 +6,9 @@ ROOT               = Path(__file__).parent
 GPKG_PATH          = ROOT / "data" / "pipeline.gpkg"
 MUNICIPIO_GEOJSON  = ROOT / "static" / "ComayaguaMunicipio.geojson"
 
+# ── Endpoints ──────────────────────────────────────────────────────────────────
+OPENEO = "openeofed.dataspace.copernicus.eu"
+
 # ── Capas del GeoPackage ───────────────────────────────────────────────────────
 LAYERS_GPKG = {
     "parcelas":    "parcelas_vigentes",   # nombre real en el gpkg tras el seeding
