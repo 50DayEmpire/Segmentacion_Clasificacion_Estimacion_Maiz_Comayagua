@@ -232,3 +232,71 @@ def calcular_gpp_vpm(
         "APAR": df_apar,
         "GPP": df_gpp,
     }
+
+def calcular_biomasa_y_rendimiento(
+    df_gpp_recortado: pd.DataFrame,
+    cue: float = 0.55,
+    fraccion_carbono: float = 0.45,
+    harvest_index: float = 0.48
+) -> dict:
+    """
+    Calcula la Productividad Primaria Neta (NPP), la dinámica de acumulación
+    de biomasa seca y el rendimiento final de grano (Yield) para múltiples parcelas.
+
+    Parameters
+    ----------
+    df_gpp_recortado : pd.DataFrame
+        DataFrame con DatetimeIndex diario, conteniendo únicamente las fechas
+        del ciclo de cultivo ya recortadas. Cada columna es una parcela.
+        Unidades: g C / m² / día.
+    cue : float, opcional
+        Eficiencia de Uso del Carbono (Carbon Use Efficiency: NPP/GPP).
+        Por defecto 0.55 para Maíz (C4).
+    fraccion_carbono : float, opcional
+        Proporción de carbono elemental en la materia seca de la planta.
+        Por defecto 0.45 (45%).
+    harvest_index : float, opcional
+        Índice de Cosecha (HI). Proporción de biomasa aérea que se convierte en grano.
+        Por defecto 0.48 (48%).
+
+    Returns
+    -------
+    dict[str, pd.DataFrame o pd.Series]
+        Un diccionario con los siguientes componentes del modelo agro-ecológico:
+        - 'npp_diario': DataFrame con la dinámica de NPP (g C / m² / día).
+        - 'biomasa_acumulada': DataFrame con la biomasa seca total acumulada día a día (g MS / m²).
+        - 'yield_final_tha': Serie con el rendimiento comercial final por parcela (t/ha).
+    """
+    # Validar que no se pasen DataFrames vacíos tras el recorte temporal
+    if df_gpp_recortado.empty:
+        raise ValueError("El DataFrame de GPP proporcionado está vacío. Verifica las fechas de recorte.")
+
+    # 1. Calcular NPP Diario (g C / m² / día)
+    # Colapsa el carbono bruto restando la respiración autótrofa de la planta
+    df_npp = df_gpp_recortado * cue
+
+    # 2. Calcular el incremento diario de Biomasa Seca Total (g MS / m² / día)
+    # Convertimos los gramos de Carbono puro a gramos de Tejido Vegetal Seco
+    df_biomasa_diaria = df_npp / fraccion_carbono
+
+    # 3. Simular el crecimiento acumulativo del cultivo (Integral Temporal)
+    # .cumsum() realiza la suma acumulada consecutiva a lo largo de las filas (eje temporal)
+    df_biomasa_acumulada = df_biomasa_diaria.cumsum()
+
+    # 4. Extraer la Biomasa Máxima alcanzada al final del ciclo de corte
+    # .iloc[-1] toma directamente la última fila del DataFrame acumulado (Día de Cosecha/Madurez)
+    biomasa_final_g_m2 = df_biomasa_acumulada.iloc[-1]
+
+    # 5. Calcular el Rendimiento de Grano Final
+    # Multiplicamos la biomasa por el Harvest Index y convertimos de (g / m²) a (t / ha)
+    # Factor de conversión: (1 g/m² * 10,000 m²/ha) / 1,000,000 g/t = 0.01
+    yield_final_tha = biomasa_final_g_m2 * harvest_index * 0.01
+
+    # Nombrar la serie resultante para mantener el orden en el pipeline
+    yield_final_tha.name = "Yield (t/ha)"
+
+    return {
+        "npp_diario": df_npp,
+        "biomasa_acumulada": df_biomasa_acumulada,
+        "yield_final_tha": yield_final_tha
+    }
