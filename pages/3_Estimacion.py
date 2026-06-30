@@ -4,13 +4,6 @@ from components.graficas_estimacion import render_comparacion_estimacion
 from components.sidebar_filtros import render_filtros_estimacion
 from config import CICLOS, VENTANAS, RENDIMIENTO_REF, COLORES_CICLO
 
-st.set_page_config(
-    page_title="Estimación — Observatorio Maíz",
-    page_icon="⚖️",
-    layout="wide",
-    initial_sidebar_state="expanded",
-)
-
 # ── Título ─────────────────────────────────────────────────────────────────────
 st.markdown("## ⚖️ Estimación de Rendimiento")
 st.markdown(

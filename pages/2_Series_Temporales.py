@@ -3,13 +3,6 @@ import streamlit as st
 from components.graficas_series import render_series_temporales
 from components.sidebar_filtros import render_filtros_series
 
-st.set_page_config(
-    page_title="Series Temporales — Observatorio Maíz",
-    page_icon="📈",
-    layout="wide",
-    initial_sidebar_state="expanded",
-)
-
 # ── Título ─────────────────────────────────────────────────────────────────────
 st.markdown("## 📈 Series Temporales")
 st.markdown(

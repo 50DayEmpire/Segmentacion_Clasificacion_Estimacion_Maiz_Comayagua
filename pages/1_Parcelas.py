@@ -2,13 +2,7 @@
 import streamlit as st
 from components.mapa_parcelas import render_mapa_parcelas
 from components.sidebar_filtros import render_filtros_parcelas
-
-st.set_page_config(
-    page_title="Parcelas — Observatorio Maíz",
-    page_icon="🗺️",
-    layout="wide",
-    initial_sidebar_state="expanded",
-)
+from utils.queries import cargar_parcelas
 
 # ── Título ─────────────────────────────────────────────────────────────────────
 st.markdown("## 🗺️ Parcelas")
@@ -21,6 +15,10 @@ st.divider()
 # ── Filtros en el sidebar ──────────────────────────────────────────────────────
 with st.sidebar:
     filtros = render_filtros_parcelas()
+    st.divider()
+    if st.button("🔄 Limpiar caché", use_container_width=True, help="Recarga los datos desde la base de datos"):
+        cargar_parcelas.clear()
+        st.rerun()
 
 # ── Layout principal: mapa + panel lateral de detalle ─────────────────────────
 col_mapa, col_detalle = st.columns([3, 1], gap="medium")

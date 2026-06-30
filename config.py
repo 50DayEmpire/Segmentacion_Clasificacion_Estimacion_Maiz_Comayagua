@@ -2,12 +2,13 @@
 from pathlib import Path
 
 # ── Rutas ──────────────────────────────────────────────────────────────────────
-ROOT      = Path(__file__).parent
-GPKG_PATH = ROOT / "data" / "pipeline.gpkg"
+ROOT               = Path(__file__).parent
+GPKG_PATH          = ROOT / "data" / "pipeline.gpkg"
+MUNICIPIO_GEOJSON  = ROOT / "static" / "ComayaguaMunicipio.geojson"
 
 # ── Capas del GeoPackage ───────────────────────────────────────────────────────
 LAYERS_GPKG = {
-    "parcelas":    "parcelas",
+    "parcelas":    "parcelas_vigentes",   # nombre real en el gpkg tras el seeding
     "ciclos":      "ciclos",
     "gpp_diario":  "gpp_diario",
     "rendimiento": "rendimiento",
@@ -48,10 +49,13 @@ RENDIMIENTO_MIN_QQ_HA = 0
 RENDIMIENTO_MAX_QQ_HA = 120
 
 # ── Parámetros del mapa Folium ─────────────────────────────────────────────────
-MAPA_CENTRO_LAT  = 14.453    # Valle de Comayagua
-MAPA_CENTRO_LON  = -87.637
-MAPA_ZOOM_INICIO = 12
+MAPA_CENTRO_LAT  = 14.477    # centro geográfico del municipio de Comayagua
+MAPA_CENTRO_LON  = -87.641
+MAPA_ZOOM_INICIO = 11        # zoom adecuado para ver el municipio completo
 MAPA_TILES       = "CartoDB dark_matter"
+
+# ── Bounding box del municipio de Comayagua (EPSG:4326) ───────────────────────
+MUNICIPIO_BOUNDS = [-87.897, 14.357, -87.385, 14.597]  # [minx, miny, maxx, maxy]
 
 # ── CRS ───────────────────────────────────────────────────────────────────────
 CRS_METRICO    = "EPSG:32616"

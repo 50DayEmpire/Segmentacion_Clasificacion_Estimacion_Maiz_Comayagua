@@ -4,13 +4,6 @@ from components.graficas_resumen import render_resumen_valle
 from components.sidebar_filtros import render_filtros_resumen
 from config import METRICAS_VALIDACION, COLORES_CICLO
 
-st.set_page_config(
-    page_title="Resumen Valle — Observatorio Maíz",
-    page_icon="📊",
-    layout="wide",
-    initial_sidebar_state="expanded",
-)
-
 # ── Título ─────────────────────────────────────────────────────────────────────
 st.markdown("## 📊 Resumen del Valle")
 st.markdown(
