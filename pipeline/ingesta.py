@@ -17,6 +17,7 @@ import geopandas as gpd
 import numpy as np
 import openeo
 import pandas as pd
+from config import ESCALA, BOA_OFFSET
 
 from utils.dict_a_dataframe import openeo_dict_to_dataframes
 
@@ -151,6 +152,9 @@ def obtener_datacube_indices_crudo(
         temporal_extent=temp_ext,
         bands=["B02", "B04", "B08", "B11"],
     )
+
+    # IMPORTANTE: Conversión de DN a reflectancia real (0-1) para EVI/LSWI:
+    datacube_vpm = datacube_vpm.apply(lambda x: (x - BOA_OFFSET) / ESCALA)
 
     datacube_limpio = datacube_vpm.mask(cloud_mask)
     datacube_final  = datacube_limpio.mask_polygon(geojson_openeo)

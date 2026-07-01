@@ -21,12 +21,25 @@ LAYERS_GPKG = {
 
 # ── Ciclos de siembra ──────────────────────────────────────────────────────────
 CICLOS = {
-    "Primera (may–oct)":  "primera",
-    "Postrera (ago–ene)": "postrera",
+    "Primera (may-oct)":  "primera",
+    "Postrera (ago-ene)": "postrera",
 }
+
+DURACION_CICLO = 120 # días — duración típica de un ciclo de cultivo de maíz en Comayagua
 
 # ── Ventanas de predicción ─────────────────────────────────────────────────────
 VENTANAS = ["T1", "T2", "T3"]
+
+DIAS_VENTANAS = {
+    "T1": 30,  # días desde el inicio de temporada (SOS)
+    "T2": 60,  # días desde el inicio de temporada (SOS)
+    "T3": 90,  # días desde el inicio de temporada (SOS)
+}
+
+# ---- Parámetros para corrección de DN y cálculo de reflectancia real -----------------
+
+ESCALA = 10000  # Escala de reflectancia usada en los productos Sentinel-2 (DN * 10000)
+BOA_OFFSET = -1000
 
 # ── Colores por ciclo ──────────────────────────────────────────────────────────
 COLOR_PRIMERA  = "#2ecc71"   # verde
