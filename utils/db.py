@@ -99,6 +99,7 @@ def seeding(rutaGJSON: str) -> None:
                     lswi_suavizado              REAL,
                     temperatura_diaria_promedio REAL    NOT NULL,
                     gpp_diario                  REAL    NOT NULL,
+                    PRIMARY KEY (id_parcela, fecha),
                     FOREIGN KEY (id_parcela) REFERENCES parcelas_vigentes(id_parcela)
                 );
             """)

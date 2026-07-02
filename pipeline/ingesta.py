@@ -207,16 +207,10 @@ def obtener_datacube_indices_crudo(
     )
 
     print("⏳  7. Descargando series temporales a memoria local...")
-    diccionario_vpm = cube_promedios.execute()
-
-    print("🗂️   8. Convirtiendo resultado a DataFrames pandas...")
-    dfs_vpm = openeo_dict_to_dataframes(
-        diccionario=diccionario_vpm,
-        nombres_bandas=["EVI", "LSWI"],
-    )
 
     print("✅  Ingesta completada.")
-    return dfs_vpm
+
+    return cube_promedios
 
 
 def _convertir_temperatura(val_raw: float | int | str) -> float:
