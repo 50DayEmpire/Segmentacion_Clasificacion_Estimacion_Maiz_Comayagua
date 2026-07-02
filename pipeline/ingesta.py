@@ -207,11 +207,19 @@ def obtener_datacube_indices_crudo(
     )
 
     print("⏳  7. Descargando series temporales a memoria local...")
+    #Fix temporal para ejecutar como batch, ejecución síncrona dejó de funcionar
+    job = cube_promedios.execute_batch()
+    diccionario_vpm = job.get_results().get_asset().load_json()
+
+    print("🗂️   8. Convirtiendo resultado a DataFrames pandas...")
+    dfs_vpm = openeo_dict_to_dataframes(
+        diccionario=diccionario_vpm,
+        nombres_bandas=["EVI", "LSWI"],
+    )
 
     print("✅  Ingesta completada.")
 
-    return cube_promedios
-
+    return dfs_vpm
 
 def _convertir_temperatura(val_raw: float | int | str) -> float:
     """
