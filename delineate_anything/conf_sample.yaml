@@ -16,8 +16,8 @@ treat_as_vrt: false
 
 mask_info:
   range: 24               # Number of classes in the mask, or null if it includes negative values
-  filter_classes: [1, 10, 11, 12, 23]  # Classes used to remove whole polygons on overlap
-  clip_classes: [0, 13, 14]        # Classes used to clip overlapping polygon areas
+  filter_classes: []  # Classes used to remove whole polygons on overlap
+  clip_classes: []        # Classes used to clip overlapping polygon areas
 
 background_info:
   # Add these classes as the background to the delineated fields to cover regions in case of model failure
@@ -54,7 +54,7 @@ passes:
         use_half: true        # Use FP16 inference / in case of CPU will be overwritten to false
 
     delineation_config:
-      pixel_area_threshold: 512
+      pixel_area_threshold: 256
       remaining_area_threshold: 0.8
       compose_merge_iou: 0.8
 
@@ -74,8 +74,8 @@ polygonization_args:
 
 filtering_args:
   # if True - automatically scale minimum_area_m2, minimum_part_area_m2, minimum_hole_area_m2 proportionally to pixel area of the input imagery
-  automatic_area_scale: True
-  minimum_area_m2: 2500
+  automatic_area_scale: False
+  minimum_area_m2: 0
   minimum_part_area_m2: 0
   minimum_hole_area_m2: 2500
 
