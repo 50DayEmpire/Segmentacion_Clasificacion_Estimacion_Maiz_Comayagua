@@ -236,7 +236,7 @@ def _accion_append_parcelas() -> None:
 
 def _accion_delinear() -> None:
     _seccion("Delineate-Anything — segmentación automática")
-    _warn("Requiere el .venv de delineate_anything configurado.")
+    _warn("Este es un proceso pesado, tardará aprox. 1 hora")
     confirmar = _pedir("¿Continuar? (s/n)", "n")
     if confirmar.lower() != "s":
         return

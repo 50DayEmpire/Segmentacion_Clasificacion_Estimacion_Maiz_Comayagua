@@ -22,8 +22,8 @@ LAYERS_GPKG = {
 
 # ── Ciclos de siembra ──────────────────────────────────────────────────────────
 CICLOS = {
-    "Primera (may-oct)":  "primera",
-    "Postrera (ago-ene)": "postrera",
+    "Primera (abril-julio)":  "primera", #Segun CAN 2024
+    "Postrera (agosto-marzo)": "postrera",
 }
 
 DURACION_CICLO = 120 # días — duración típica de un ciclo de cultivo de maíz en Comayagua
