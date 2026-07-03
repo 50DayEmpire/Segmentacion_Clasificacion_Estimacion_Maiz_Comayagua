@@ -7,7 +7,8 @@ GPKG_PATH          = ROOT / "data" / "pipeline.gpkg"
 MUNICIPIO_GEOJSON  = ROOT / "static" / "ComayaguaMunicipio.geojson"
 
 # ── Endpoints ──────────────────────────────────────────────────────────────────
-OPENEO = "openeofed.dataspace.copernicus.eu"
+OPENEO = "openeo.dataspace.copernicus.eu"
+OPENEOFED = "openeofed.dataspace.copernicus.eu"
 
 # ── Capas del GeoPackage ───────────────────────────────────────────────────────
 LAYERS_GPKG = {

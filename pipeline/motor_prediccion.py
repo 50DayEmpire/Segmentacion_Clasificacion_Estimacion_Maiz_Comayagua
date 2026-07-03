@@ -27,6 +27,7 @@ from pipeline.modulo_vpm import (
     calcular_biomasa_y_rendimiento,
 )
 from pipeline.modulo_fenologico import detectar_sos
+from utils.db import guardar_indices_crudos
 
 # ── Defaults de los parámetros del modelo VPM ─────────────────────────────────
 _VPM_DEFAULTS: dict = {
@@ -169,6 +170,7 @@ def ejecutar_pipeline_completo(
     geojson_openeo: dict,
     fecha_inicio: str,
     fecha_fin: str,
+    connection_fed: openeo.Connection | None = None,
     config_cloud_mask: dict | None = None,
     lambda_param: float = 4000.0,
     lswi_max: pd.Series | dict[str, float] | None = None,
@@ -185,7 +187,13 @@ def ejecutar_pipeline_completo(
     Parámetros
     ----------
     connection : openeo.Connection
-        Conexión activa y autenticada al backend openEO.
+        Conexión activa al backend **CDSE** (openeo.dataspace.copernicus.eu).
+        Se usa exclusivamente para la ingesta de índices Sentinel-2.
+    connection_fed : openeo.Connection | None
+        Conexión activa al backend **federado** (openeofed.dataspace.copernicus.eu).
+        Se usa exclusivamente para la ingesta de datos climáticos AgERA5.
+        Si es None, se reutiliza ``connection`` (comportamiento legacy, puede
+        fallar si el backend CDSE no expone la colección AGERA5).
     geojson_openeo : dict
         GeoJSON FeatureCollection con las parcelas en EPSG:4326.
     fecha_inicio : str
@@ -223,6 +231,18 @@ def ejecutar_pipeline_completo(
     """
     cfg_vpm = {**_VPM_DEFAULTS, **(config_vpm or {})}
 
+    # El backend federado es el único que expone AgERA5; si no se pasa
+    # explícitamente, caer de vuelta a connection con una advertencia.
+    conn_clima = connection_fed if connection_fed is not None else connection
+    if connection_fed is None:
+        import warnings
+        warnings.warn(
+            "connection_fed no fue proporcionado. Se usará 'connection' para AgERA5, "
+            "lo cual puede fallar si el backend CDSE no expone esa colección. "
+            "Pasa connection_fed=<conexión al backend federado> para evitar este problema.",
+            stacklevel=2,
+        )
+
     print("=" * 60)
     print("🚀 MOTOR DE PREDICCIÓN VPM — INICIO DE PIPELINE COMPLETO")
     print(f"   Período: {fecha_inicio}  →  {fecha_fin}")
@@ -237,11 +257,12 @@ def ejecutar_pipeline_completo(
         fecha_fin=fecha_fin,
         config_cloud_mask=config_cloud_mask,
     )
+    guardar_indices_crudos(dfs_crudos)
 
     # ── Paso 2: Ingesta de datos climáticos ───────────────────────────────
-    print("\n🌤️  PASO 2/5 — Ingesta de datos climáticos (AgERA5 / CDSE)...")
+    print("\n🌤️  PASO 2/5 — Ingesta de datos climáticos (AgERA5 / backend federado)...")
     dfs_clima = obtener_datos_climaticos_crudo(
-        connection=connection,
+        connection=conn_clima,
         geojson_openeo=geojson_openeo,
         fecha_inicio=fecha_inicio,
         fecha_fin=fecha_fin,

@@ -11,7 +11,7 @@ def get_connection_raw() -> sqlite3.Connection:
     return sqlite3.connect(GPKG_PATH, check_same_thread=False)
 
 
-@st.cache_resource
+# @st.cache_resource
 def get_connection() -> sqlite3.Connection:
     """
     Conexión SQLite con caché de Streamlit.

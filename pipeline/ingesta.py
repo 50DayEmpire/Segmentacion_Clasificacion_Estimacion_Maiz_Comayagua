@@ -212,9 +212,21 @@ def obtener_datacube_indices_crudo(
     diccionario_vpm = job.get_results().get_asset().load_json()
 
     print("🗂️   8. Convirtiendo resultado a DataFrames pandas...")
+
+    # Extraer id_parcela reales del GeoJSON en el mismo orden que se enviaron
+    # a aggregate_spatial. openEO respeta el orden de features[], así que
+    # anclar la columna al id real evita asignaciones erróneas si el orden
+    # cambia entre ejecuciones o si los IDs no son consecutivos.
+    ids_parcelas = [
+        f["properties"].get("id_parcela", i)
+        for i, f in enumerate(geojson_openeo.get("features", []))
+    ]
+    nombres_columnas = [f"id_{pid}" for pid in ids_parcelas] if ids_parcelas else None
+
     dfs_vpm = openeo_dict_to_dataframes(
         diccionario=diccionario_vpm,
         nombres_bandas=["EVI", "LSWI"],
+        nombres_columnas=nombres_columnas,
     )
 
     print("✅  Ingesta completada.")
@@ -357,16 +369,20 @@ def obtener_datos_climaticos_crudo(
 if __name__ == "__main__":
     import json
     from pathlib import Path
+    from config import OPENEO, OPENEOFED
 
     GEOJSON_PATH = Path(__file__).parent.parent / "data" / "PoligonosMaizPlayitas.geojson"
     gdf = gpd.read_file(str(GEOJSON_PATH)).to_crs("EPSG:4326")
     geojson_dict = json.loads(gdf.to_json())
 
-    conn = openeo.connect("https://openeo.dataspace.copernicus.eu").authenticate_oidc()
+    # Índices → CDSE
+    conn_cdse = openeo.connect(f"https://{OPENEO}").authenticate_oidc()
+    # Clima   → backend federado
+    conn_fed  = openeo.connect(f"https://{OPENEOFED}").authenticate_oidc()
 
     # Ejemplo con máscara personalizada para escena muy nubosa
     dfs = obtener_datacube_indices_crudo(
-        connection=conn,
+        connection=conn_cdse,
         geojson_openeo=geojson_dict,
         fecha_inicio="2025-05-01",
         fecha_fin="2025-10-30",
@@ -378,5 +394,16 @@ if __name__ == "__main__":
     )
 
     for banda, df in dfs.items():
+        print(f"\n{banda}: {df.shape[0]} fechas x {df.shape[1]} parcelas")
+        print(df.head())
+
+    dfs_clima = obtener_datos_climaticos_crudo(
+        connection=conn_fed,
+        geojson_openeo=geojson_dict,
+        fecha_inicio="2025-05-01",
+        fecha_fin="2025-10-30",
+    )
+
+    for banda, df in dfs_clima.items():
         print(f"\n{banda}: {df.shape[0]} fechas x {df.shape[1]} parcelas")
         print(df.head())
