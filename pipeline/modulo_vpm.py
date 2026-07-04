@@ -48,12 +48,12 @@ def preprocesar_indices_vpm(
     df_evi = dfs_vpm_crudos["EVI"].copy()
     df_lswi = dfs_vpm_crudos["LSWI"].copy()
 
-    # es_atipico_evi = (df_evi < -1.0) | (df_evi > 1.0)
-    # es_atipico_lswi = (df_lswi < -1.0) | (df_lswi > 1.0)
-    # mascara_ruido = es_atipico_evi | es_atipico_lswi
+    es_atipico_evi = (df_evi < -1.0) | (df_evi > 1.0)
+    es_atipico_lswi = (df_lswi < -1.0) | (df_lswi > 1.0)
+    mascara_ruido = es_atipico_evi | es_atipico_lswi
 
-    # df_evi = df_evi.mask(mascara_ruido, np.nan)
-    # df_lswi = df_lswi.mask(mascara_ruido, np.nan)
+    df_evi = df_evi.mask(mascara_ruido, np.nan)
+    df_lswi = df_lswi.mask(mascara_ruido, np.nan)
 
     # ── 2. Reindexación Diaria ────────────────────────────────────────────────
     # Genera la cuadrícula temporal densa (frecuencia diaria 'D')
@@ -88,7 +88,7 @@ def preprocesar_indices_vpm(
     # W_scalar diario = (1 + LSWI_diario) / (1 + LSWI_max)
     df_w_scalar = (1.0 + df_lswi_diario) / (1.0 + lswi_max_por_parcela)
 
-    # FPAR diario = 1.0 * EVI_diario
+    # FPAR diario = 1.0 * EVI_diario Xiao 2004
     df_fpar = 1.0 * df_evi_diario
 
     num_parc = len(df_evi_diario.columns)
@@ -108,11 +108,11 @@ def preprocesar_indices_vpm(
 def calcular_gpp_vpm(
     dfs_vegetacion: dict[str, pd.DataFrame],
     dfs_clima: dict[str, pd.DataFrame],
-    epsilon_0: float = 1.6,
-    t_min: float = 10.0,
-    t_opt: float = 30.0,
-    t_max: float = 45.0,
-    par_fraction: float = 0.48,
+    epsilon_0: float = 3.12, #g C/MJ PAR — Maíz C4 (Jin 2015, kalfas 2011)
+    t_min: float = 10.0, #Kalfas 2011
+    t_opt: float = 28.0, #Kalfas 2011
+    t_max: float = 48.0, #Kalfas 2011
+    par_fraction: float = 0.45, #Xiao 2003
 ) -> dict[str, pd.DataFrame]:
     """
     Calcula la Producción Primaria Bruta (GPP) diaria continua usando el modelo VPM.
@@ -126,15 +126,15 @@ def calcular_gpp_vpm(
         Diccionario con los datos climáticos crudos o preprocesados de AgERA5.
         Debe contener: "temperature-mean" y "solar-radiation-flux".
     epsilon_0 : float, opcional
-        Máxima eficiencia fotosintética teórica (por defecto 1.6 para Maíz C4).
+        Máxima eficiencia fotosintética teórica (por defecto 3.12 para Maíz C4).
     t_min : float, opcional
         Temperatura mínima biológica (por defecto 10.0 °C).
     t_opt : float, opcional
-        Temperatura óptima de fotosíntesis (por defecto 30.0 °C).
+        Temperatura óptima de fotosíntesis (por defecto 28.0 °C).
     t_max : float, opcional
-        Temperatura máxima biológica (por defecto 45.0 °C).
+        Temperatura máxima biológica (por defecto 48.0 °C).
     par_fraction : float, opcional
-        Fracción de radiación solar fotosintéticamente activa (por defecto 0.48).
+        Fracción de radiación solar fotosintéticamente activa (por defecto 0.45).
 
     Retorna
     -------
@@ -238,9 +238,9 @@ def calcular_gpp_vpm(
 
 def calcular_biomasa_y_rendimiento(
     df_gpp_recortado: pd.DataFrame,
-    cue: float = 0.55,
-    fraccion_carbono: float = 0.45,
-    harvest_index: float = 0.48
+    cue: float = 0.5, #Zhang 2009
+    fraccion_carbono: float = 0.45, #IPCC 1997
+    harvest_index: float = 0.48 #Estimación inicial razonable para Maíz (C4) en Comayagua
 ) -> dict:
     """
     Calcula la Productividad Primaria Neta (NPP), la dinámica de acumulación

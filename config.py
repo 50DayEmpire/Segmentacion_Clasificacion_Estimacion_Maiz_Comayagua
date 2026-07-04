@@ -39,7 +39,7 @@ DIAS_VENTANAS = {
 
 # ---- Parámetros para corrección de DN y cálculo de reflectancia real -----------------
 
-ESCALA = 10000  # Escala de reflectancia usada en los productos Sentinel-2 (DN * 10000)
+ESCALA = 10000  # Escala de reflectancia usada en los productos Sentinel-2
 BOA_OFFSET = -1000
 
 # ── Colores por ciclo ──────────────────────────────────────────────────────────
