@@ -273,9 +273,9 @@ def _menu_ingesta() -> None:
     while True:
         _seccion("2 · Ingesta de Datos (openEO)")
         key = _menu({
-            "indices": "Descargar índices EVI/LSWI (Sentinel-2)",
-            "clima":   "Descargar datos climáticos (AgERA5)",
-            "ambos":   "Descargar ambos y guardar en BD",
+            "indices": "Sincronizar índices EVI/LSWI (BD + openEO si hay gaps)",
+            "clima":   "Sincronizar datos climáticos AgERA5 (BD + openEO si hay gaps)",
+            "ambos":   "Sincronizar ambos (índices + clima)",
         })
         if key == "0":
             return
@@ -287,52 +287,44 @@ def _menu_ingesta() -> None:
             _accion_ingesta_completa()
 
 def _accion_ingesta_indices() -> None:
-    _seccion("Descarga de índices EVI/LSWI  [backend: CDSE]")
+    _seccion("Sincronizar índices EVI/LSWI  [BD primero → openEO solo para gaps]")
     ciclo = _elegir_ciclo()
     fecha_inicio, fecha_fin = _pedir_fechas(ciclo)
     geojson = _cargar_geojson_parcelas()
     conn = _conectar_openeo_cdse()
-    from pipeline.ingesta import obtener_datacube_indices_crudo
-    from utils.db import guardar_indices_crudos
-    dfs = obtener_datacube_indices_crudo(conn, geojson, fecha_inicio, fecha_fin)
-    n = guardar_indices_crudos(dfs)
-    _ok(f"Guardadas {n} filas en series_diarias_vpm.")
+    from pipeline.ingesta import obtener_indices
+    dfs = obtener_indices(conn, geojson, fecha_inicio, fecha_fin)
+    df_evi = dfs["EVI"]
+    _ok(f"Índices listos: {df_evi.shape[0]} fechas × {df_evi.shape[1]} parcelas.")
     _pausar()
 
 def _accion_ingesta_clima() -> None:
-    _seccion("Descarga de datos climáticos AgERA5  [backend: federado]")
+    _seccion("Sincronizar datos climáticos AgERA5  [BD primero → openEO solo para gaps]")
     ciclo = _elegir_ciclo()
     fecha_inicio, fecha_fin = _pedir_fechas(ciclo)
     geojson = _cargar_geojson_parcelas()
     conn = _conectar_openeo_fed()
-    from pipeline.ingesta import obtener_datos_climaticos_crudo
-    dfs = obtener_datos_climaticos_crudo(conn, geojson, fecha_inicio, fecha_fin)
-    from utils.db import guardar_datos_climaticos
-    n = guardar_datos_climaticos(dfs)
-    for banda, df in dfs.items():
-        _ok(f"{banda}: {df.shape[0]} fechas × {df.shape[1]} parcelas. Escritas {n} filas en series_diarias_vpm.")
-    _info("Datos climáticos en memoria. Úsalos con calcular_rendimiento_desde_indices.")
+    from pipeline.ingesta import obtener_clima
+    dfs = obtener_clima(conn, geojson, fecha_inicio, fecha_fin)
+    df_t = dfs["temperature-mean"]
+    _ok(f"Clima listo: {df_t.shape[0]} fechas × {df_t.shape[1]} parcelas.")
     _pausar()
 
 def _accion_ingesta_completa() -> None:
-    _seccion("Descarga completa (índices + clima) y guardado en BD")
+    _seccion("Sincronizar índices + clima (BD primero → openEO solo para gaps)")
     ciclo = _elegir_ciclo()
     fecha_inicio, fecha_fin = _pedir_fechas(ciclo)
     geojson = _cargar_geojson_parcelas()
 
-    # Índices → CDSE
-    conn_cdse = _conectar_openeo_cdse()
-    from pipeline.ingesta import obtener_datacube_indices_crudo, obtener_datos_climaticos_crudo
-    from utils.db import guardar_indices_crudos, guardar_datos_climaticos
-    dfs_indices = obtener_datacube_indices_crudo(conn_cdse, geojson, fecha_inicio, fecha_fin)
-    n = guardar_indices_crudos(dfs_indices)
-    _ok(f"Índices guardados: {n} filas.")
+    from pipeline.ingesta import obtener_indices, obtener_clima
 
-    # Clima → federado
+    conn_cdse = _conectar_openeo_cdse()
+    dfs_indices = obtener_indices(conn_cdse, geojson, fecha_inicio, fecha_fin)
+    _ok(f"Índices listos: {dfs_indices['EVI'].shape[0]} fechas × {dfs_indices['EVI'].shape[1]} parcelas.")
+
     conn_fed = _conectar_openeo_fed()
-    dfs_clima = obtener_datos_climaticos_crudo(conn_fed, geojson, fecha_inicio, fecha_fin)
-    n = guardar_datos_climaticos(dfs_clima)
-    _ok(f"Clima descargado: {list(dfs_clima.keys())}, Escritas {n} filas")
+    dfs_clima = obtener_clima(conn_fed, geojson, fecha_inicio, fecha_fin)
+    _ok(f"Clima listo: {dfs_clima['temperature-mean'].shape[0]} fechas × {dfs_clima['temperature-mean'].shape[1]} parcelas.")
     _pausar()
 
 def _elegir_ciclo() -> str:
@@ -353,7 +345,7 @@ def _menu_prediccion() -> None:
     while True:
         _seccion("3 · Motor de Predicción")
         key = _menu({
-            "completo":  "Pipeline completo (descarga + predicción)",
+            "completo":  "Pipeline completo (descarga inteligente + predicción)",
             "memoria":   "Predicción desde índices en BD (sin re-descargar)",
         })
         if key == "0":
@@ -402,17 +394,11 @@ def _accion_pipeline_desde_bd() -> None:
     fecha_inicio = str(df_evi.index.min().date())
     fecha_fin    = _pedir("Fecha fin (YYYY-MM-DD)", str(df_evi.index.max().date()))
 
-    _info("Buscando datos climáticos en BD...")
-    try:
-        from pipeline.ingesta import cargar_clima_desde_bd
-        dfs_clima = cargar_clima_desde_bd(fecha_inicio=fecha_inicio, fecha_fin=fecha_fin)
-        _ok("Datos climáticos cargados desde BD.")
-    except ValueError:
-        _warn("No hay datos climáticos en BD para ese rango. Conectando al backend federado…")
-        geojson = _cargar_geojson_parcelas()
-        conn_fed = _conectar_openeo_fed()
-        from pipeline.ingesta import obtener_datos_climaticos_crudo
-        dfs_clima = obtener_datos_climaticos_crudo(conn_fed, geojson, fecha_inicio, fecha_fin)
+    _info("Sincronizando datos climáticos (BD primero → openEO solo si hay gaps)…")
+    geojson  = _cargar_geojson_parcelas()
+    conn_fed = _conectar_openeo_fed()
+    from pipeline.ingesta import obtener_clima
+    dfs_clima = obtener_clima(conn_fed, geojson, fecha_inicio, fecha_fin)
 
     from pipeline.motor_prediccion import calcular_rendimiento_desde_indices
     resultados = calcular_rendimiento_desde_indices(

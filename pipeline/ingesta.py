@@ -579,6 +579,323 @@ def cargar_clima_desde_bd(
     }
 
 
+# ══════════════════════════════════════════════════════════════════════════════
+# CAPA DE CACHÉ — obtener con cobertura parcial de BD + relleno openEO
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _detectar_gaps(
+    fecha_inicio: str,
+    fecha_fin: str,
+    fechas_en_bd: pd.DatetimeIndex,
+) -> list[tuple[str, str]]:
+    """
+    Calcula los sub-rangos del período [fecha_inicio, fecha_fin] que NO están
+    cubiertos por ``fechas_en_bd``.
+
+    ``fechas_en_bd`` debe representar **fechas que ya fueron consultadas a openEO**,
+    independientemente de si los valores son NULL (nubes) o no. Una fecha con
+    todos los valores NULL fue consultada y openEO no tenía datos útiles para ella;
+    no debe volver a pedirse.
+
+    Trabaja a granularidad de día. Devuelve una lista de tuplas
+    ``(gap_inicio, gap_fin)`` en formato "YYYY-MM-DD", listas para pasarse
+    a openEO como ``temporal_extent``.
+
+    Ejemplos
+    --------
+    Período pedido: 2025-01-01 → 2025-01-10
+    BD cubre      : 2025-01-05 → 2025-01-10  (con o sin NaN en valores)
+    Gaps           : [("2025-01-01", "2025-01-04")]
+
+    Período pedido: 2025-01-01 → 2025-01-10
+    BD cubre      : 2025-01-03 → 2025-01-07
+    Gaps           : [("2025-01-01", "2025-01-02"), ("2025-01-08", "2025-01-10")]
+
+    Período pedido: 2025-01-01 → 2025-01-10
+    BD cubre      : (vacío)
+    Gaps           : [("2025-01-01", "2025-01-10")]
+    """
+    rango_completo = pd.date_range(fecha_inicio, fecha_fin, freq="D")
+
+    if fechas_en_bd.empty:
+        return [(fecha_inicio, fecha_fin)]
+
+    fechas_faltantes = rango_completo.difference(fechas_en_bd.normalize())
+
+    if fechas_faltantes.empty:
+        return []
+
+    # Agrupar fechas contiguas en sub-rangos
+    gaps: list[tuple[str, str]] = []
+    bloque_inicio = fechas_faltantes[0]
+    bloque_prev   = fechas_faltantes[0]
+
+    for fecha in fechas_faltantes[1:]:
+        if (fecha - bloque_prev).days == 1:
+            bloque_prev = fecha
+        else:
+            gaps.append((bloque_inicio.strftime("%Y-%m-%d"), bloque_prev.strftime("%Y-%m-%d")))
+            bloque_inicio = fecha
+            bloque_prev   = fecha
+
+    gaps.append((bloque_inicio.strftime("%Y-%m-%d"), bloque_prev.strftime("%Y-%m-%d")))
+    return gaps
+
+
+def _fechas_consultadas_indices(
+    fecha_inicio: str,
+    fecha_fin: str,
+    ids_parcelas: list[int] | None = None,
+) -> pd.DatetimeIndex:
+    """
+    Devuelve las fechas que **ya fueron enviadas a openEO** para índices,
+    independientemente de si ``evi_crudo`` / ``lswi_crudo`` son NULL.
+
+    Una fila con valores NULL significa que openEO respondió sin datos útiles
+    (nubosidad total); la fecha fue consultada y no debe pedirse de nuevo.
+
+    Se considera que una fecha está cubierta si existe al menos un registro
+    ``(id_parcela, fecha)`` en ``series_diarias_vpm`` para alguna parcela del
+    conjunto, sin importar si los valores de índice son NULL.
+    """
+    from contextlib import closing
+    from utils.conexionDB import get_connection_raw
+
+    condiciones = ["fecha BETWEEN ? AND ?"]
+    params: list = [fecha_inicio, fecha_fin]
+
+    if ids_parcelas:
+        ph = ",".join(["?"] * len(ids_parcelas))
+        condiciones.append(f"id_parcela IN ({ph})")
+        params.extend(ids_parcelas)
+
+    sql = f"""
+        SELECT DISTINCT fecha
+        FROM series_diarias_vpm
+        WHERE {' AND '.join(condiciones)}
+        ORDER BY fecha;
+    """
+
+    with closing(get_connection_raw()) as conn:
+        df = pd.read_sql(sql, conn, params=params, parse_dates=["fecha"])
+
+    return df["fecha"].dt.normalize() if not df.empty else pd.DatetimeIndex([])
+
+
+def _fechas_consultadas_clima(
+    fecha_inicio: str,
+    fecha_fin: str,
+    ids_parcelas: list[int] | None = None,
+) -> pd.DatetimeIndex:
+    """
+    Devuelve las fechas que **ya fueron enviadas a openEO** para clima,
+    independientemente de si ``temperatura_diaria_promedio`` / ``radiacion_total_promedio``
+    son NULL.
+
+    Una fila con ambos valores climáticos NULL significa que openEO respondió
+    sin datos; la fecha fue consultada y no debe pedirse de nuevo.
+
+    Se considera que una fecha está cubierta si existe al menos un registro
+    ``(id_parcela, fecha)`` en ``series_diarias_vpm`` para alguna parcela.
+
+    Nota: a diferencia de los índices, el clima no produce NULLs por nubes
+    (AgERA5 es un reanálisis sin huecos), pero se aplica la misma lógica
+    por consistencia y robustez.
+    """
+    from contextlib import closing
+    from utils.conexionDB import get_connection_raw
+
+    condiciones = [
+        "fecha BETWEEN ? AND ?",
+        "(temperatura_diaria_promedio IS NOT NULL OR radiacion_total_promedio IS NOT NULL)",
+    ]
+    params: list = [fecha_inicio, fecha_fin]
+
+    if ids_parcelas:
+        ph = ",".join(["?"] * len(ids_parcelas))
+        condiciones.append(f"id_parcela IN ({ph})")
+        params.extend(ids_parcelas)
+
+    sql = f"""
+        SELECT DISTINCT fecha
+        FROM series_diarias_vpm
+        WHERE {' AND '.join(condiciones)}
+        ORDER BY fecha;
+    """
+
+    with closing(get_connection_raw()) as conn:
+        df = pd.read_sql(sql, conn, params=params, parse_dates=["fecha"])
+
+    return df["fecha"].dt.normalize() if not df.empty else pd.DatetimeIndex([])
+
+
+def obtener_indices(
+    connection: openeo.Connection,
+    geojson_openeo: dict,
+    fecha_inicio: str,
+    fecha_fin: str,
+    config_cloud_mask: dict | None = None,
+    forzar_descarga: bool = False,
+) -> dict[str, pd.DataFrame]:
+    """
+    Versión con caché de ``obtener_datacube_indices_crudo``.
+
+    Consulta la BD primero y solo descarga de openEO las fechas que faltan.
+    Si la BD cubre el rango completo no se realiza ninguna petición a openEO.
+
+    Lógica
+    ------
+    1. Consultar BD para el rango [fecha_inicio, fecha_fin].
+    2. Detectar sub-rangos sin cobertura (gaps).
+    3. Para cada gap, llamar a ``obtener_datacube_indices_crudo`` y persistir
+       en BD con ``guardar_indices_crudos``.
+    4. Consolidar datos de BD + descargados y devolver el rango completo.
+
+    Parámetros
+    ----------
+    connection : openeo.Connection
+        Conexión activa al backend CDSE. Solo se usa si hay gaps.
+    geojson_openeo : dict
+        GeoJSON FeatureCollection con las parcelas en EPSG:4326.
+    fecha_inicio : str
+        Inicio del rango en formato "YYYY-MM-DD".
+    fecha_fin : str
+        Fin del rango en formato "YYYY-MM-DD".
+    config_cloud_mask : dict | None
+        Overrides para la máscara SCL. Igual que en ``obtener_datacube_indices_crudo``.
+    forzar_descarga : bool
+        Si ``True``, ignora la BD y descarga el rango completo desde openEO,
+        sobreescribiendo los datos existentes (``mode="replace"``).
+
+    Retorna
+    -------
+    dict[str, pd.DataFrame]
+        ``{"EVI": DataFrame, "LSWI": DataFrame}``
+        Mismo esquema que ``obtener_datacube_indices_crudo``.
+    """
+    from utils.db import guardar_indices_crudos
+
+    if forzar_descarga:
+        print(f"🔄  forzar_descarga=True — descargando [{fecha_inicio} → {fecha_fin}] completo desde openEO...")
+        dfs = obtener_datacube_indices_crudo(connection, geojson_openeo, fecha_inicio, fecha_fin, config_cloud_mask)
+        guardar_indices_crudos(dfs, mode="replace")
+        return dfs
+
+    # ── 1. Consultar qué fechas ya fueron enviadas a openEO (con o sin NaN) ───
+    # No se usa el DataFrame de valores para detectar cobertura: una fecha
+    # nublada tiene fila en BD con evi_crudo=NULL y NO debe re-consultarse.
+    fechas_cubiertas = _fechas_consultadas_indices(fecha_inicio, fecha_fin)
+
+    # ── 2. Detectar gaps ──────────────────────────────────────────────────────
+    gaps = _detectar_gaps(fecha_inicio, fecha_fin, fechas_cubiertas)
+
+    if not gaps:
+        print(f"✅  Índices: BD cubre el rango completo [{fecha_inicio} → {fecha_fin}]. Sin descarga openEO.")
+        # Cargar los valores (incluye NaN por nubes) para devolver el DataFrame completo
+        try:
+            return cargar_indices_desde_bd(fecha_inicio=fecha_inicio, fecha_fin=fecha_fin)
+        except ValueError:
+            # Todas las filas existen pero todos los valores son NaN — devolver igual
+            return cargar_indices_desde_bd(fecha_inicio=fecha_inicio, fecha_fin=fecha_fin)
+
+    print(f"📡  Índices: {len(gaps)} gap(s) detectado(s) → se descargarán de openEO:")
+    for g_ini, g_fin in gaps:
+        print(f"     • {g_ini} → {g_fin}")
+
+    # ── 3. Descargar cada gap y persistir ─────────────────────────────────────
+    for g_ini, g_fin in gaps:
+        print(f"\n🛰️  Descargando gap [{g_ini} → {g_fin}]...")
+        dfs_gap = obtener_datacube_indices_crudo(
+            connection, geojson_openeo, g_ini, g_fin, config_cloud_mask
+        )
+        guardar_indices_crudos(dfs_gap, mode="append")
+
+    # ── 4. Recargar desde BD (fuente de verdad) y devolver rango completo ─────
+    # Se recarga desde BD en lugar de consolidar en memoria para garantizar que
+    # lo devuelto es exactamente lo que quedó persistido, incluyendo NaN por nubes.
+    return cargar_indices_desde_bd(fecha_inicio=fecha_inicio, fecha_fin=fecha_fin)
+
+
+def obtener_clima(
+    connection: openeo.Connection,
+    geojson_openeo: dict,
+    fecha_inicio: str,
+    fecha_fin: str,
+    num_parc: int | None = None,
+    forzar_descarga: bool = False,
+) -> dict[str, pd.DataFrame]:
+    """
+    Versión con caché de ``obtener_datos_climaticos_crudo``.
+
+    Consulta la BD primero y solo descarga de openEO las fechas que faltan.
+    Si la BD cubre el rango completo no se realiza ninguna petición a openEO.
+
+    Lógica
+    ------
+    1. Consultar BD para el rango [fecha_inicio, fecha_fin].
+    2. Detectar sub-rangos sin cobertura (gaps).
+    3. Para cada gap, llamar a ``obtener_datos_climaticos_crudo`` y persistir
+       en BD con ``guardar_datos_climaticos``.
+    4. Consolidar datos de BD + descargados y devolver el rango completo.
+
+    Parámetros
+    ----------
+    connection : openeo.Connection
+        Conexión activa al backend federado (AgERA5). Solo se usa si hay gaps.
+    geojson_openeo : dict
+        GeoJSON FeatureCollection con las parcelas en EPSG:4326.
+    fecha_inicio : str
+        Inicio del rango en formato "YYYY-MM-DD".
+    fecha_fin : str
+        Fin del rango en formato "YYYY-MM-DD".
+    num_parc : int | None
+        Número de parcelas. Si None se infiere del GeoJSON.
+    forzar_descarga : bool
+        Si ``True``, ignora la BD y descarga el rango completo desde openEO,
+        sobreescribiendo los datos existentes (``mode="replace"``).
+
+    Retorna
+    -------
+    dict[str, pd.DataFrame]
+        ``{"temperature-mean": DataFrame, "solar-radiation-flux": DataFrame}``
+        Mismo esquema que ``obtener_datos_climaticos_crudo``.
+    """
+    from utils.db import guardar_datos_climaticos
+
+    if forzar_descarga:
+        print(f"🔄  forzar_descarga=True — descargando [{fecha_inicio} → {fecha_fin}] completo desde openEO...")
+        dfs = obtener_datos_climaticos_crudo(connection, geojson_openeo, fecha_inicio, fecha_fin, num_parc)
+        guardar_datos_climaticos(dfs, mode="replace")
+        return dfs
+
+    # ── 1. Consultar qué fechas ya fueron enviadas a openEO ───────────────────
+    # Para clima (AgERA5) no hay NaN por nubes, pero usamos la misma lógica:
+    # solo fechas con al menos un valor climático no-NULL cuentan como cubiertas.
+    fechas_cubiertas = _fechas_consultadas_clima(fecha_inicio, fecha_fin)
+
+    # ── 2. Detectar gaps ──────────────────────────────────────────────────────
+    gaps = _detectar_gaps(fecha_inicio, fecha_fin, fechas_cubiertas)
+
+    if not gaps:
+        print(f"✅  Clima: BD cubre el rango completo [{fecha_inicio} → {fecha_fin}]. Sin descarga openEO.")
+        return cargar_clima_desde_bd(fecha_inicio=fecha_inicio, fecha_fin=fecha_fin)
+
+    print(f"🌤️  Clima: {len(gaps)} gap(s) detectado(s) → se descargarán de openEO:")
+    for g_ini, g_fin in gaps:
+        print(f"     • {g_ini} → {g_fin}")
+
+    # ── 3. Descargar cada gap y persistir ─────────────────────────────────────
+    for g_ini, g_fin in gaps:
+        print(f"\n🌍  Descargando gap climático [{g_ini} → {g_fin}]...")
+        dfs_gap = obtener_datos_climaticos_crudo(
+            connection, geojson_openeo, g_ini, g_fin, num_parc
+        )
+        guardar_datos_climaticos(dfs_gap, mode="append")
+
+    # ── 4. Recargar desde BD (fuente de verdad) y devolver rango completo ─────
+    return cargar_clima_desde_bd(fecha_inicio=fecha_inicio, fecha_fin=fecha_fin)
+
+
 if __name__ == "__main__":
     import json
     from pathlib import Path

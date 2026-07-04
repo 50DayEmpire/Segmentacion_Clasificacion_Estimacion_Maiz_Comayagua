@@ -20,7 +20,12 @@ from __future__ import annotations
 import openeo
 import pandas as pd
 
-from pipeline.ingesta import obtener_datacube_indices_crudo, obtener_datos_climaticos_crudo
+from pipeline.ingesta import (
+    obtener_datacube_indices_crudo,
+    obtener_datos_climaticos_crudo,
+    obtener_indices,
+    obtener_clima,
+)
 from pipeline.modulo_vpm import (
     preprocesar_indices_vpm,
     calcular_gpp_vpm,
@@ -250,18 +255,17 @@ def ejecutar_pipeline_completo(
 
     # ── Paso 1: Ingesta de índices espectrales ─────────────────────────────
     print("\n📡 PASO 1/5 — Ingesta de índices espectrales (Sentinel-2 / CDSE)...")
-    dfs_crudos = obtener_datacube_indices_crudo(
+    dfs_crudos = obtener_indices(
         connection=connection,
         geojson_openeo=geojson_openeo,
         fecha_inicio=fecha_inicio,
         fecha_fin=fecha_fin,
         config_cloud_mask=config_cloud_mask,
     )
-    guardar_indices_crudos(dfs_crudos)
 
     # ── Paso 2: Ingesta de datos climáticos ───────────────────────────────
     print("\n🌤️  PASO 2/5 — Ingesta de datos climáticos (AgERA5 / backend federado)...")
-    dfs_clima = obtener_datos_climaticos_crudo(
+    dfs_clima = obtener_clima(
         connection=conn_clima,
         geojson_openeo=geojson_openeo,
         fecha_inicio=fecha_inicio,
