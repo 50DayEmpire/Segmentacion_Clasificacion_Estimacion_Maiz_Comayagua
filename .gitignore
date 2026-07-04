@@ -20,7 +20,7 @@ build/
 .eggs/
 
 # ── Datos y modelos entrenados ─────────────────────────────────────────────────
-data/
+
 *.gpkg
 *.geojson
 *.shp
@@ -37,6 +37,7 @@ data/
 *.joblib
 *.npy
 *.npz
+*.xml
 
 # ── Notebooks ─────────────────────────────────────────────────────────────────
 .ipynb_checkpoints/

@@ -366,6 +366,219 @@ def obtener_datos_climaticos_crudo(
     }
 
 
+def cargar_indices_desde_bd(
+    fecha_inicio: str | None = None,
+    fecha_fin: str | None = None,
+    ids_parcelas: list[int] | None = None,
+) -> dict[str, pd.DataFrame]:
+    """
+    Consulta ``series_diarias_vpm`` y devuelve los índices crudos en el
+    mismo formato que ``obtener_datacube_indices_crudo``, listo para
+    pasarse directamente a ``preprocesar_indices_vpm``.
+
+    Parámetros
+    ----------
+    fecha_inicio : str | None
+        Filtro de fecha inicial en formato ``"YYYY-MM-DD"``.
+        Si es ``None`` se devuelven todas las fechas disponibles desde
+        el registro más antiguo.
+    fecha_fin : str | None
+        Filtro de fecha final en formato ``"YYYY-MM-DD"``.
+        Si es ``None`` se devuelven todas las fechas hasta el registro
+        más reciente.
+    ids_parcelas : list[int] | None
+        Lista de ``id_parcela`` a incluir. Si es ``None`` se devuelven
+        todas las parcelas presentes en la tabla.
+
+    Retorna
+    -------
+    dict[str, pd.DataFrame]
+        ``{"EVI": DataFrame, "LSWI": DataFrame}``
+        DatetimeIndex × columnas ``"id_<id_parcela>"``, mismo esquema
+        que el resultado de ``obtener_datacube_indices_crudo``.
+
+    Raises
+    ------
+    ValueError
+        Si la consulta no devuelve filas (tabla vacía o filtros sin resultados).
+    """
+    from contextlib import closing
+    from utils.conexionDB import get_connection_raw
+
+    condiciones: list[str] = []
+    params: list = []
+
+    if fecha_inicio:
+        condiciones.append("fecha >= ?")
+        params.append(fecha_inicio)
+    if fecha_fin:
+        condiciones.append("fecha <= ?")
+        params.append(fecha_fin)
+    if ids_parcelas:
+        placeholders = ",".join(["?"] * len(ids_parcelas))
+        condiciones.append(f"id_parcela IN ({placeholders})")
+        params.extend(ids_parcelas)
+
+    where = f"WHERE {' AND '.join(condiciones)}" if condiciones else ""
+
+    sql = f"""
+        SELECT id_parcela, fecha, evi_crudo, lswi_crudo
+        FROM series_diarias_vpm
+        {where}
+        ORDER BY fecha, id_parcela;
+    """
+
+    with closing(get_connection_raw()) as conn:
+        df_raw = pd.read_sql(sql, conn, params=params, parse_dates=["fecha"])
+
+    if df_raw.empty:
+        filtros = {
+            "fecha_inicio": fecha_inicio,
+            "fecha_fin":    fecha_fin,
+            "ids_parcelas": ids_parcelas,
+        }
+        raise ValueError(
+            f"La consulta no devolvió filas. Verifica que la tabla 'series_diarias_vpm' "
+            f"tenga datos con los filtros aplicados: {filtros}"
+        )
+
+    # Normalizar fechas a medianoche (coincide con el formato de ingesta openEO)
+    df_raw["fecha"] = df_raw["fecha"].dt.normalize()
+
+    # Nombres de columna en formato "id_<N>" — idéntico al de obtener_datacube_indices_crudo
+    df_raw["parcela_col"] = "id_" + df_raw["id_parcela"].astype(str)
+
+    df_evi = df_raw.pivot(index="fecha", columns="parcela_col", values="evi_crudo")
+    df_lswi = df_raw.pivot(index="fecha", columns="parcela_col", values="lswi_crudo")
+
+    df_evi.index.name  = None
+    df_lswi.index.name = None
+    df_evi.columns.name  = None
+    df_lswi.columns.name = None
+
+    n_fechas  = len(df_evi)
+    n_parcelas = len(df_evi.columns)
+    print(
+        f"✅  Índices cargados desde BD: {n_fechas} fechas × {n_parcelas} parcelas "
+        f"({df_raw['fecha'].min().date()} → {df_raw['fecha'].max().date()})."
+    )
+
+    return {"EVI": df_evi, "LSWI": df_lswi}
+
+
+def cargar_clima_desde_bd(
+    fecha_inicio: str | None = None,
+    fecha_fin: str | None = None,
+    ids_parcelas: list[int] | None = None,
+) -> dict[str, pd.DataFrame]:
+    """
+    Consulta ``series_diarias_vpm`` y devuelve los datos climáticos en el
+    mismo formato que ``obtener_datos_climaticos_crudo``, listo para
+    pasarse directamente a ``calcular_gpp_vpm``.
+
+    AgERA5 tiene resolución ~11 km: todas las parcelas comparten la misma
+    serie regional. La función reconstruye el broadcast con columnas
+    ``"id_<id_parcela>"`` para mantener consistencia con el resto del pipeline.
+
+    Parámetros
+    ----------
+    fecha_inicio : str | None
+        Filtro de fecha inicial en formato ``"YYYY-MM-DD"``.
+        Si es ``None`` se devuelven todas las fechas disponibles desde
+        el registro más antiguo.
+    fecha_fin : str | None
+        Filtro de fecha final en formato ``"YYYY-MM-DD"``.
+        Si es ``None`` se devuelven todas las fechas hasta el registro
+        más reciente.
+    ids_parcelas : list[int] | None
+        Lista de ``id_parcela`` a incluir. Si es ``None`` se devuelven
+        todas las parcelas presentes en la tabla.
+
+    Retorna
+    -------
+    dict[str, pd.DataFrame]
+        ``{"temperature-mean": DataFrame, "solar-radiation-flux": DataFrame}``
+        DatetimeIndex x columnas ``"id_<id_parcela>"``, mismo esquema
+        que el resultado de ``obtener_datos_climaticos_crudo``.
+
+    Raises
+    ------
+    ValueError
+        Si la consulta no devuelve filas con datos climáticos (ambas columnas
+        NULL) o si los filtros no coinciden con ningún registro.
+    """
+    from contextlib import closing
+    from utils.conexionDB import get_connection_raw
+
+    condiciones: list[str] = [
+        "(temperatura_diaria_promedio IS NOT NULL OR radiacion_total_promedio IS NOT NULL)"
+    ]
+    params: list = []
+
+    if fecha_inicio:
+        condiciones.append("fecha >= ?")
+        params.append(fecha_inicio)
+    if fecha_fin:
+        condiciones.append("fecha <= ?")
+        params.append(fecha_fin)
+    if ids_parcelas:
+        placeholders = ",".join(["?"] * len(ids_parcelas))
+        condiciones.append(f"id_parcela IN ({placeholders})")
+        params.extend(ids_parcelas)
+
+    where = f"WHERE {' AND '.join(condiciones)}"
+
+    sql = f"""
+        SELECT id_parcela, fecha,
+               temperatura_diaria_promedio,
+               radiacion_total_promedio
+        FROM series_diarias_vpm
+        {where}
+        ORDER BY fecha, id_parcela;
+    """
+
+    with closing(get_connection_raw()) as conn:
+        df_raw = pd.read_sql(sql, conn, params=params, parse_dates=["fecha"])
+
+    if df_raw.empty:
+        filtros = {
+            "fecha_inicio": fecha_inicio,
+            "fecha_fin":    fecha_fin,
+            "ids_parcelas": ids_parcelas,
+        }
+        raise ValueError(
+            f"La consulta no devolvió filas con datos climáticos. "
+            f"Verifica que la tabla 'series_diarias_vpm' tenga datos climáticos "
+            f"con los filtros aplicados: {filtros}"
+        )
+
+    df_raw["fecha"] = df_raw["fecha"].dt.normalize()
+    df_raw["parcela_col"] = "id_" + df_raw["id_parcela"].astype(str)
+
+    df_temp = df_raw.pivot(
+        index="fecha", columns="parcela_col", values="temperatura_diaria_promedio"
+    )
+    df_rad = df_raw.pivot(
+        index="fecha", columns="parcela_col", values="radiacion_total_promedio"
+    )
+
+    for df in (df_temp, df_rad):
+        df.index.name   = None
+        df.columns.name = None
+
+    n_fechas   = len(df_temp)
+    n_parcelas = len(df_temp.columns)
+    print(
+        f"✅  Clima cargado desde BD: {n_fechas} fechas × {n_parcelas} parcelas "
+        f"({df_raw['fecha'].min().date()} → {df_raw['fecha'].max().date()})."
+    )
+
+    return {
+        "temperature-mean":      df_temp,
+        "solar-radiation-flux":  df_rad,
+    }
+
+
 if __name__ == "__main__":
     import json
     from pathlib import Path

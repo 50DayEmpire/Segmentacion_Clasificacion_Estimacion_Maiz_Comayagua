@@ -136,9 +136,8 @@ def seeding(rutaGJSON: str) -> None:
                     fecha                       DATE    NOT NULL,
                     evi_crudo                   REAL,
                     lswi_crudo                  REAL,
-                    evi                         REAL,
-                    lswi                        REAL,
                     temperatura_diaria_promedio REAL,
+                    radiacion_total_promedio    REAL,
                     gpp_diario                  REAL,
                     PRIMARY KEY (id_parcela, fecha),
                     FOREIGN KEY (id_parcela) REFERENCES parcelas_vigentes(id_parcela)
@@ -146,11 +145,53 @@ def seeding(rutaGJSON: str) -> None:
             """)
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS produccion_acumulada_ciclo (
+                    id_ciclo         INTEGER NOT NULL,
                     id_parcela       INTEGER NOT NULL,
-                    fecha_inicio     DATE    NOT NULL,
-                    fecha_fin        DATE    NOT NULL,
-                    rendimiento      REAL    NOT NULL,
-                    produccion_total REAL    NOT NULL,
+                    temporada        TEXT,
+                    lswi_max         REAL,
+                    sos              DATE,
+                    t1               DATE,
+                    t2               DATE,
+                    t3               DATE,
+                    eos              DATE,
+                    fecha_inicio     DATE,
+                    fecha_fin        DATE,
+                    rendimiento      REAL,
+                    produccion_total REAL,
+                    PRIMARY KEY (id_ciclo),
+                    FOREIGN KEY (id_parcela) REFERENCES parcelas_vigentes(id_parcela)
+                    UNIQUE (id_parcela, fecha_inicio, fecha_fin)
+                );
+            """)
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS indices_suavizados(
+                    id_ciclo         INTEGER NOT NULL,
+                    fecha            DATE    NOT NULL,
+                    id_parcela       INTEGER NOT NULL,
+                    evi              REAL,
+                    lswi             REAL,
+                    PRIMARY KEY (id_ciclo, fecha)
+                    FOREIGN KEY (id_ciclo) REFERENCES produccion_acumulada_ciclo(id_ciclo)
+                    FOREIGN KEY (id_parcela) REFERENCES parcelas_vigentes(id_parcela)
+                );
+            """)
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS predicciones_ventana (
+                    id_prediccion              INTEGER NOT NULL,
+                    id_ciclo                   INTEGER NOT NULL,
+                    id_parcela                 INTEGER NOT NULL,
+                    ventana                    TEXT    NOT NULL,
+                    fecha_ventana              DATE    NOT NULL,
+                    lswi_max_efectivo_usado    REAL,
+                    gpp_acumulado              REAL,
+                    npp_acumulado              REAL,
+                    rendimiento_estimado_qq_ha       REAL,
+                    rendimiento_estimado_qq_parcela  REAL,
+                    fecha_congelamiento        TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    PRIMARY KEY (id_prediccion AUTOINCREMENT),
+                    UNIQUE (id_ciclo, ventana),
+                    CHECK (ventana IN ('T1', 'T2', 'T3')),
+                    FOREIGN KEY (id_ciclo) REFERENCES produccion_acumulada_ciclo(id_ciclo),
                     FOREIGN KEY (id_parcela) REFERENCES parcelas_vigentes(id_parcela)
                 );
             """)
@@ -166,16 +207,9 @@ def guardar_indices_crudos(
     Persiste el resultado de ``obtener_datacube_indices_crudo`` en la tabla
     ``series_diarias_vpm`` del GeoPackage SQLite.
 
-    El dict de entrada tiene la forma::
-
-        {
-            "EVI":  pd.DataFrame,   # DatetimeIndex × columnas Parcela_N
-            "LSWI": pd.DataFrame,   # DatetimeIndex × columnas Parcela_N
-        }
-
-    La función hace un FULL OUTER JOIN por (fecha, parcela) entre ambos
-    DataFrames para garantizar que se guarden todas las fechas aunque una
-    banda no tenga valor en alguna fecha puntual (NaN → NULL en SQLite).
+    Solo escribe evi_crudo y lswi_crudo. Nunca toca gpp_diario ni
+    temperatura_diaria_promedio, que son responsabilidad de otras etapas
+    del pipeline.
 
     Parámetros
     ----------
@@ -183,10 +217,13 @@ def guardar_indices_crudos(
         Resultado directo de ``obtener_datacube_indices_crudo``.
         Se esperan las claves ``"EVI"`` y ``"LSWI"``.
     mode : {"append", "replace"}
-        - ``"append"`` (defecto): inserta filas nuevas; las que ya existan
-          se actualizan con ``INSERT OR REPLACE`` para no duplicar.
-        - ``"replace"``: borra **todas** las filas de la tabla antes de insertar.
-          Útil para re-ingestas completas de un ciclo.
+        - ``"append"`` (defecto): upsert por (id_parcela, fecha). Si la fila
+          ya existe, evi_crudo/lswi_crudo solo se rellenan si están en NULL
+          (inmutabilidad del crudo); gpp_diario y temperatura_diaria_promedio
+          nunca se tocan.
+        - ``"replace"``: borra las filas existentes de las parcelas y el
+          rango de fechas presentes en ``dfs`` (no toda la tabla) antes de
+          insertar. Útil para re-ingestas completas de un ciclo específico.
 
     Retorna
     -------
@@ -198,7 +235,8 @@ def guardar_indices_crudos(
     KeyError
         Si el dict no contiene alguna de las claves ``"EVI"`` o ``"LSWI"``.
     ValueError
-        Si los DataFrames están vacíos o no tienen índice de fechas.
+        Si los DataFrames están vacíos, no tienen índice de fechas, o algún
+        nombre de columna no permite extraer id_parcela.
     """
     if "EVI" not in dfs or "LSWI" not in dfs:
         raise KeyError(f"El dict debe contener 'EVI' y 'LSWI'. Claves recibidas: {list(dfs.keys())}")
@@ -209,67 +247,217 @@ def guardar_indices_crudos(
     if df_evi.empty and df_lswi.empty:
         raise ValueError("Ambos DataFrames están vacíos; no hay datos que persistir.")
 
-    # ── Normalizar índice a fecha (sin hora) ──────────────────────────────────
     for df in (df_evi, df_lswi):
         df.index = pd.to_datetime(df.index).normalize()
         df.index.name = "fecha"
 
-    # ── Llevar a formato largo (tidy): una fila por (fecha, parcela) ──────────
     def _a_largo(df: pd.DataFrame, col_valor: str) -> pd.DataFrame:
         largo = (
             df.reset_index()
               .melt(id_vars="fecha", var_name="parcela_col", value_name=col_valor)
         )
-        # Extraer id_parcela del nombre de columna.
-        # Soporta el formato seguro "id_<N>" (ej. "id_42") generado por ingesta,
-        # y como fallback el formato posicional legacy "Parcela_<N>" (ej. "Parcela_1").
         id_extraido = largo["parcela_col"].str.extract(r"^id_(\d+)$")[0]
         if id_extraido.isna().all():
-            # fallback: "Parcela_N" — posicional, menos confiable
             id_extraido = largo["parcela_col"].str.extract(r"(\d+)$")[0]
+
+        if id_extraido.isna().any():
+            problematicas = largo.loc[id_extraido.isna(), "parcela_col"].unique().tolist()
+            raise ValueError(
+                f"No se pudo extraer id_parcela de las columnas: {problematicas}"
+            )
+
         largo["id_parcela"] = id_extraido.astype(int)
         return largo[["id_parcela", "fecha", col_valor]]
 
     largo_evi  = _a_largo(df_evi,  "evi_crudo")
     largo_lswi = _a_largo(df_lswi, "lswi_crudo")
 
-    # ── Unir EVI y LSWI por (id_parcela, fecha) ───────────────────────────────
-    merged = pd.merge(
-        largo_evi,
-        largo_lswi,
-        on=["id_parcela", "fecha"],
-        how="outer",
-    )
-
-    # Columnas opcionales que la tabla acepta como NULL si no vienen aún
-    for col in ("evi_suavizado", "lswi_suavizado", "temperatura_diaria_promedio", "gpp_diario"):
-        if col not in merged.columns:
-            merged[col] = None
-
+    merged = pd.merge(largo_evi, largo_lswi, on=["id_parcela", "fecha"], how="outer")
     merged["fecha"] = merged["fecha"].dt.strftime("%Y-%m-%d")
 
-    rows = list(
-        merged[["id_parcela", "fecha", "evi_crudo", "lswi_crudo"]].itertuples(
-            index=False, name=None
-        )
-    )
+    df_rows = merged[["id_parcela", "fecha", "evi_crudo", "lswi_crudo"]].astype(object)
+    df_rows = df_rows.where(pd.notna(df_rows), None)
+    rows = list(df_rows.itertuples(index=False, name=None))
 
     if not rows:
         print("⚠️  Sin filas para escribir.")
         return 0
 
-    sql_insert = """
-        INSERT OR REPLACE INTO series_diarias_vpm
-            (id_parcela, fecha, evi_crudo, lswi_crudo)
+    sql_upsert = """
+        INSERT INTO series_diarias_vpm (id_parcela, fecha, evi_crudo, lswi_crudo)
         VALUES (?, ?, ?, ?)
+        ON CONFLICT (id_parcela, fecha) DO UPDATE SET
+            evi_crudo  = COALESCE(series_diarias_vpm.evi_crudo, excluded.evi_crudo),
+            lswi_crudo = COALESCE(series_diarias_vpm.lswi_crudo, excluded.lswi_crudo)
     """
 
     with closing(get_connection_raw()) as conn:
         with conn:
             if mode == "replace":
-                conn.execute("DELETE FROM series_diarias_vpm;")
-                print("🗑️  Tabla series_diarias_vpm vaciada (mode='replace').")
-            conn.executemany(sql_insert, rows)
+                parcelas = merged["id_parcela"].unique().tolist()
+                fecha_min, fecha_max = merged["fecha"].min(), merged["fecha"].max()
+                placeholders = ",".join(["?"] * len(parcelas))
+                conn.execute(
+                    f"""DELETE FROM series_diarias_vpm
+                        WHERE id_parcela IN ({placeholders})
+                          AND fecha BETWEEN ? AND ?""",
+                    (*parcelas, fecha_min, fecha_max),
+                )
+                print(f"🗑️  {len(parcelas)} parcela(s) reiniciadas en el rango {fecha_min}–{fecha_max} (mode='replace').")
+            conn.executemany(sql_upsert, rows)
 
     n = len(rows)
     print(f"✅  {n} filas escritas en 'series_diarias_vpm' (mode='{mode}').")
+    return n
+
+
+def guardar_datos_climaticos(
+    dfs: dict[str, pd.DataFrame],
+    ids_parcelas: list[int] | None = None,
+    mode: Literal["replace", "append"] = "append",
+) -> int:
+    """
+    Persiste el resultado de ``obtener_datos_climaticos_crudo`` en la tabla
+    ``series_diarias_vpm`` del GeoPackage SQLite.
+
+    Solo escribe ``temperatura_diaria_promedio`` y ``radiacion_total_promedio``.
+    Nunca toca ``evi_crudo``, ``lswi_crudo`` ni ``gpp_diario``.
+
+    AgERA5 tiene resolución ~11 km, por lo que todas las parcelas comparten
+    la misma serie temporal.  Las columnas de los DataFrames de entrada se
+    llaman ``Parcela_1``, ``Parcela_2``, ... (broadcast desde ingesta.py).
+    El parámetro ``ids_parcelas`` permite mapear esas columnas a los
+    ``id_parcela`` reales del GeoPackage; si se omite, se infieren como
+    índice 0-based a partir del nombre de columna (``Parcela_N → N-1``).
+
+    Parámetros
+    ----------
+    dfs : dict[str, pd.DataFrame]
+        Resultado directo de ``obtener_datos_climaticos_crudo``.
+        Se esperan las claves ``"temperature-mean"`` y ``"solar-radiation-flux"``.
+        Cada DataFrame tiene DatetimeIndex y columnas ``Parcela_1…N``.
+    ids_parcelas : list[int] | None
+        Lista de ``id_parcela`` reales en el mismo orden que las columnas
+        de los DataFrames (``Parcela_1`` → ``ids_parcelas[0]``, etc.).
+        Si es ``None``, se usa ``Parcela_N - 1`` como id (0-based).
+    mode : {"append", "replace"}
+        - ``"append"`` (defecto): upsert por (id_parcela, fecha). Si la fila
+          ya existe, los campos climáticos solo se rellenan si están en NULL
+          (inmutabilidad del crudo).
+        - ``"replace"``: elimina las filas existentes de las parcelas y el
+          rango de fechas presente en ``dfs`` antes de insertar.
+
+    Retorna
+    -------
+    int
+        Número de filas escritas en la base de datos.
+
+    Raises
+    ------
+    KeyError
+        Si el dict no contiene ``"temperature-mean"`` o ``"solar-radiation-flux"``.
+    ValueError
+        Si ambos DataFrames están vacíos o no tienen índice de fechas válido.
+    """
+    clave_temp = "temperature-mean"
+    clave_rad  = "solar-radiation-flux"
+
+    if clave_temp not in dfs or clave_rad not in dfs:
+        raise KeyError(
+            f"El dict debe contener '{clave_temp}' y '{clave_rad}'. "
+            f"Claves recibidas: {list(dfs.keys())}"
+        )
+
+    df_temp = dfs[clave_temp].copy()
+    df_rad  = dfs[clave_rad].copy()
+
+    if df_temp.empty and df_rad.empty:
+        raise ValueError("Ambos DataFrames están vacíos; no hay datos que persistir.")
+
+    for df in (df_temp, df_rad):
+        df.index = pd.to_datetime(df.index).normalize()
+        df.index.name = "fecha"
+
+    def _a_largo(df: pd.DataFrame, col_valor: str) -> pd.DataFrame:
+        """Pivota de ancho a largo y resuelve id_parcela real."""
+        largo = (
+            df.reset_index()
+              .melt(id_vars="fecha", var_name="parcela_col", value_name=col_valor)
+        )
+        # Columnas esperadas: "Parcela_1", "Parcela_2", ...
+        n_extraido = largo["parcela_col"].str.extract(r"^Parcela_(\d+)$")[0]
+
+        if n_extraido.isna().any():
+            problematicas = largo.loc[n_extraido.isna(), "parcela_col"].unique().tolist()
+            raise ValueError(
+                f"No se pudo extraer el índice de parcela de las columnas: {problematicas}. "
+                f"Se esperan nombres con formato 'Parcela_N'."
+            )
+
+        # Convertir a id_parcela: si el usuario proveyó la lista, mapear;
+        # si no, usar N-1 (índice 0-based coincidente con la tabla).
+        if ids_parcelas is not None:
+            n_to_id = {str(i + 1): pid for i, pid in enumerate(ids_parcelas)}
+            id_series = n_extraido.map(n_to_id)
+            if id_series.isna().any():
+                raise ValueError(
+                    "``ids_parcelas`` no cubre todos los índices de columna del DataFrame."
+                )
+            largo["id_parcela"] = id_series.astype(int)
+        else:
+            largo["id_parcela"] = n_extraido.astype(int) - 1
+
+        return largo[["id_parcela", "fecha", col_valor]]
+
+    largo_temp = _a_largo(df_temp, "temperatura_diaria_promedio")
+    largo_rad  = _a_largo(df_rad,  "radiacion_total_promedio")
+
+    merged = pd.merge(largo_temp, largo_rad, on=["id_parcela", "fecha"], how="outer")
+    merged["fecha"] = merged["fecha"].dt.strftime("%Y-%m-%d")
+
+    cols = ["id_parcela", "fecha", "temperatura_diaria_promedio", "radiacion_total_promedio"]
+    df_rows = merged[cols].astype(object)
+    df_rows = df_rows.where(pd.notna(df_rows), None)
+    rows = list(df_rows.itertuples(index=False, name=None))
+
+    if not rows:
+        print("⚠️  Sin filas para escribir.")
+        return 0
+
+    sql_upsert = """
+        INSERT INTO series_diarias_vpm
+            (id_parcela, fecha, temperatura_diaria_promedio, radiacion_total_promedio)
+        VALUES (?, ?, ?, ?)
+        ON CONFLICT (id_parcela, fecha) DO UPDATE SET
+            temperatura_diaria_promedio = COALESCE(
+                series_diarias_vpm.temperatura_diaria_promedio,
+                excluded.temperatura_diaria_promedio
+            ),
+            radiacion_total_promedio = COALESCE(
+                series_diarias_vpm.radiacion_total_promedio,
+                excluded.radiacion_total_promedio
+            )
+    """
+
+    with closing(get_connection_raw()) as conn:
+        with conn:
+            if mode == "replace":
+                parcelas = merged["id_parcela"].unique().tolist()
+                fecha_min, fecha_max = merged["fecha"].min(), merged["fecha"].max()
+                placeholders = ",".join(["?"] * len(parcelas))
+                conn.execute(
+                    f"""DELETE FROM series_diarias_vpm
+                        WHERE id_parcela IN ({placeholders})
+                          AND fecha BETWEEN ? AND ?""",
+                    (*parcelas, fecha_min, fecha_max),
+                )
+                print(
+                    f"🗑️  {len(parcelas)} parcela(s) reiniciadas en el rango "
+                    f"{fecha_min}–{fecha_max} (mode='replace')."
+                )
+            conn.executemany(sql_upsert, rows)
+
+    n = len(rows)
+    print(f"✅  {n} filas escritas en 'series_diarias_vpm' (campos climáticos, mode='{mode}').")
+    return n
+

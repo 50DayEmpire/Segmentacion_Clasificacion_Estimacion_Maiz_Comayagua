@@ -307,8 +307,10 @@ def _accion_ingesta_clima() -> None:
     conn = _conectar_openeo_fed()
     from pipeline.ingesta import obtener_datos_climaticos_crudo
     dfs = obtener_datos_climaticos_crudo(conn, geojson, fecha_inicio, fecha_fin)
+    from utils.db import guardar_datos_climaticos
+    n = guardar_datos_climaticos(dfs)
     for banda, df in dfs.items():
-        _ok(f"{banda}: {df.shape[0]} fechas × {df.shape[1]} parcelas")
+        _ok(f"{banda}: {df.shape[0]} fechas × {df.shape[1]} parcelas. Escritas {n} filas en series_diarias_vpm.")
     _info("Datos climáticos en memoria. Úsalos con calcular_rendimiento_desde_indices.")
     _pausar()
 
@@ -321,7 +323,7 @@ def _accion_ingesta_completa() -> None:
     # Índices → CDSE
     conn_cdse = _conectar_openeo_cdse()
     from pipeline.ingesta import obtener_datacube_indices_crudo, obtener_datos_climaticos_crudo
-    from utils.db import guardar_indices_crudos
+    from utils.db import guardar_indices_crudos, guardar_datos_climaticos
     dfs_indices = obtener_datacube_indices_crudo(conn_cdse, geojson, fecha_inicio, fecha_fin)
     n = guardar_indices_crudos(dfs_indices)
     _ok(f"Índices guardados: {n} filas.")
@@ -329,7 +331,8 @@ def _accion_ingesta_completa() -> None:
     # Clima → federado
     conn_fed = _conectar_openeo_fed()
     dfs_clima = obtener_datos_climaticos_crudo(conn_fed, geojson, fecha_inicio, fecha_fin)
-    _ok(f"Clima descargado: {list(dfs_clima.keys())}")
+    n = guardar_datos_climaticos(dfs_clima)
+    _ok(f"Clima descargado: {list(dfs_clima.keys())}, Escritas {n} filas")
     _pausar()
 
 def _elegir_ciclo() -> str:
@@ -382,40 +385,34 @@ def _accion_pipeline_desde_bd() -> None:
     _seccion("Predicción desde índices en BD")
     _info("Cargando índices crudos desde series_diarias_vpm…")
 
-    # Reconstruir dfs_crudos desde la BD
     try:
-        with closing(_get_conn()) as conn:
-            import pandas as pd
-            df_raw = pd.read_sql(
-                "SELECT id_parcela, fecha, evi_crudo, lswi_crudo FROM series_diarias_vpm ORDER BY fecha;",
-                conn,
-                parse_dates=["fecha"],
-            )
+        from pipeline.ingesta import cargar_indices_desde_bd
+        dfs_crudos = cargar_indices_desde_bd()
+    except ValueError as exc:
+        _warn(str(exc))
+        _pausar(); return
     except Exception as exc:
         _error(f"No se pudo leer la BD: {exc}")
         _pausar(); return
 
-    if df_raw.empty:
-        _warn("No hay datos en series_diarias_vpm. Corre la ingesta primero.")
-        _pausar(); return
-
-    import pandas as pd
-    df_raw["parcela_col"] = "id_" + df_raw["id_parcela"].astype(str)
-    df_evi  = df_raw.pivot(index="fecha", columns="parcela_col", values="evi_crudo")
-    df_lswi = df_raw.pivot(index="fecha", columns="parcela_col", values="lswi_crudo")
-    dfs_crudos = {"EVI": df_evi, "LSWI": df_lswi}
-
+    df_evi = dfs_crudos["EVI"]
     _ok(f"Índices cargados: {df_evi.shape[0]} fechas × {df_evi.shape[1]} parcelas.")
 
     # Pedir fechas y datos climáticos
     fecha_inicio = str(df_evi.index.min().date())
     fecha_fin    = _pedir("Fecha fin (YYYY-MM-DD)", str(df_evi.index.max().date()))
 
-    _info("Se necesitan datos climáticos (AgERA5). Conectando al backend federado…")
-    geojson = _cargar_geojson_parcelas()
-    conn_fed = _conectar_openeo_fed()
-    from pipeline.ingesta import obtener_datos_climaticos_crudo
-    dfs_clima = obtener_datos_climaticos_crudo(conn_fed, geojson, fecha_inicio, fecha_fin)
+    _info("Buscando datos climáticos en BD...")
+    try:
+        from pipeline.ingesta import cargar_clima_desde_bd
+        dfs_clima = cargar_clima_desde_bd(fecha_inicio=fecha_inicio, fecha_fin=fecha_fin)
+        _ok("Datos climáticos cargados desde BD.")
+    except ValueError:
+        _warn("No hay datos climáticos en BD para ese rango. Conectando al backend federado…")
+        geojson = _cargar_geojson_parcelas()
+        conn_fed = _conectar_openeo_fed()
+        from pipeline.ingesta import obtener_datos_climaticos_crudo
+        dfs_clima = obtener_datos_climaticos_crudo(conn_fed, geojson, fecha_inicio, fecha_fin)
 
     from pipeline.motor_prediccion import calcular_rendimiento_desde_indices
     resultados = calcular_rendimiento_desde_indices(
