@@ -195,6 +195,31 @@ def seeding(rutaGJSON: str) -> None:
                     FOREIGN KEY (id_parcela) REFERENCES parcelas_vigentes(id_parcela)
                 );
             """)
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS climatologia_diaria (
+                    id_region           INTEGER NOT NULL DEFAULT 1,
+                    variable            TEXT    NOT NULL,
+                    dia_anio            INTEGER NOT NULL,
+                    valor_climatologico REAL    NOT NULL,
+                    anio_min_incluido   INTEGER NOT NULL,
+                    anio_max_incluido   INTEGER NOT NULL,
+                    fecha_calculo       TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    PRIMARY KEY (id_region, variable, dia_anio),
+                    CHECK (variable IN ('PAR', 'temperatura')),
+                    CHECK (dia_anio BETWEEN 1 AND 366)
+                );
+            """)
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS series_extrapoladas_ventana (
+                    id_prediccion    INTEGER NOT NULL,
+                    fecha            DATE    NOT NULL,
+                    evi_extrapolado  REAL,
+                    lswi_extrapolado REAL,
+                    PRIMARY KEY (id_prediccion, fecha),
+                    FOREIGN KEY (id_prediccion) REFERENCES predicciones_ventana(id_prediccion)
+                        ON DELETE CASCADE
+                );
+            """)
 
     print("Seeding completado.")
 

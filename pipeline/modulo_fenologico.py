@@ -118,68 +118,125 @@ def detectar_sos(
         "umbral": umbral,
     }
 
-    def detectar_sos_por_parcela(
-        resultado_preprocesamiento: dict[str, pd.DataFrame],
-        indice: str = "EVI",
-        factor: float = 0.2,
-        metodo: str = "seasonal_amplitude",
-        ventanas_busqueda: dict[str, tuple] | tuple | None = None,
-    ) -> pd.DataFrame:
-        """
-        Ejecuta detectar_sos para cada parcela presente en el resultado de
-        preprocesar_indices_vpm, y consolida los resultados en un DataFrame.
+def detectar_sos_por_parcela(
+    resultado_preprocesamiento: dict[str, pd.DataFrame],
+    indice: str = "EVI",
+    factor: float = 0.2,
+    metodo: str = "seasonal_amplitude",
+    ventanas_busqueda: dict[str, tuple] | tuple | None = None,
+) -> pd.DataFrame:
+    """
+    Ejecuta detectar_sos para cada parcela presente en el resultado de
+    preprocesar_indices_vpm, y consolida los resultados en un DataFrame.
 
-        Parámetros
-        ----------
-        resultado_preprocesamiento : dict[str, pd.DataFrame]
-            Salida de preprocesar_indices_vpm.
-        indice : str, opcional
-            "EVI" o "LSWI" (por defecto "EVI").
-        factor : float, opcional
-            Ver detectar_sos.
-        metodo : str, opcional
-            Ver detectar_sos.
-        ventanas_busqueda : dict[str, tuple] | tuple | None, opcional
-            - dict: mapea id_parcela -> (fecha_ini, fecha_fin), para ventanas
-            específicas por parcela (ej. centradas en mediana histórica de SOS).
-            - tuple: misma ventana aplicada a todas las parcelas.
-            - None: sin restricción de ventana.
+    Parámetros
+    ----------
+    resultado_preprocesamiento : dict[str, pd.DataFrame]
+        Salida de preprocesar_indices_vpm.
+    indice : str, opcional
+        "EVI" o "LSWI" (por defecto "EVI").
+    factor : float, opcional
+        Ver detectar_sos.
+    metodo : str, opcional
+        Ver detectar_sos.
+    ventanas_busqueda : dict[str, tuple] | tuple | None, opcional
+        - dict: mapea id_parcela -> (fecha_ini, fecha_fin), para ventanas
+        específicas por parcela (ej. centradas en mediana histórica de SOS).
+        - tuple: misma ventana aplicada a todas las parcelas.
+        - None: sin restricción de ventana.
 
-        Retorna
-        -------
-        pd.DataFrame
-            Una fila por parcela, columnas: id_parcela, sos_fecha, sos_valor,
-            pos_fecha, pos_valor, base_valor, amplitud, umbral.
-            Parcelas sin datos válidos quedan con columnas en None/NaN pero
-            siempre aparecen en el resultado (no se descartan silenciosamente).
-        """
-        df = resultado_preprocesamiento[indice]
-        filas = []
+    Retorna
+    -------
+    pd.DataFrame
+        Una fila por parcela, columnas: id_parcela, sos_fecha, sos_valor,
+        pos_fecha, pos_valor, base_valor, amplitud, umbral.
+        Parcelas sin datos válidos quedan con columnas en None/NaN pero
+        siempre aparecen en el resultado (no se descartan silenciosamente).
+    """
+    df = resultado_preprocesamiento[indice]
+    filas = []
 
-        for id_parcela in df.columns:
-            try:
-                serie, fechas = extraer_serie_para_sos(
-                    resultado_preprocesamiento, id_parcela, indice=indice
-                )
-            except ValueError:
-                # Parcela sin ninguna observación válida en el rango disponible
-                filas.append({"id_parcela": id_parcela, "sos_fecha": None,
-                            "sos_valor": None, "pos_fecha": None, "pos_valor": None,
-                            "base_valor": None, "amplitud": None, "umbral": None})
-                continue
-
-            if isinstance(ventanas_busqueda, dict):
-                ventana = ventanas_busqueda.get(id_parcela)
-            else:
-                ventana = ventanas_busqueda
-
-            resultado = detectar_sos(
-                serie=serie, fechas=fechas, factor=factor,
-                metodo=metodo, ventana_busqueda=ventana,
+    for id_parcela in df.columns:
+        try:
+            serie, fechas = extraer_serie_para_sos(
+                resultado_preprocesamiento, id_parcela, indice=indice
             )
-            resultado["id_parcela"] = id_parcela
-            filas.append(resultado)
+        except ValueError:
+            # Parcela sin ninguna observación válida en el rango disponible
+            filas.append({"id_parcela": id_parcela, "sos_fecha": None,
+                        "sos_valor": None, "pos_fecha": None, "pos_valor": None,
+                        "base_valor": None, "amplitud": None, "umbral": None})
+            continue
 
-        columnas_orden = ["id_parcela", "sos_fecha", "sos_valor", "pos_fecha",
-                        "pos_valor", "base_valor", "amplitud", "umbral"]
-        return pd.DataFrame(filas)[columnas_orden]
+        if isinstance(ventanas_busqueda, dict):
+            ventana = ventanas_busqueda.get(id_parcela)
+        else:
+            ventana = ventanas_busqueda
+
+        resultado = detectar_sos(
+            serie=serie, fechas=fechas, factor=factor,
+            metodo=metodo, ventana_busqueda=ventana,
+        )
+        resultado["id_parcela"] = id_parcela
+        filas.append(resultado)
+
+    columnas_orden = ["id_parcela", "sos_fecha", "sos_valor", "pos_fecha",
+                    "pos_valor", "base_valor", "amplitud", "umbral"]
+    return pd.DataFrame(filas)[columnas_orden]
+
+
+#===================================================================================================================
+#                                     Experimental
+#===================================================================================================================
+from scipy.signal import find_peaks
+
+def segmentar_ciclos(serie: pd.Series, distancia_min_dias: int = 90,
+                      prominencia_min: float = 0.15) -> list[tuple[pd.Timestamp, pd.Timestamp]]:
+    """
+    Segmenta una serie suavizada multi-anual (EVI o LSWI, post-Whittaker)
+    en ciclos individuales, delimitados por valles consecutivos. De carácter
+    retroactivo.
+
+    Parámetros
+    ----------
+    serie : pd.Series
+        Índice suavizado, DatetimeIndex diario, sin NaN.
+    distancia_min_dias : int
+        Separación mínima entre dos valles consecutivos, para evitar que
+        una caída transitoria (nube residual, racha seca corta) se
+        confunda con el fin real de un ciclo. Debe ser menor que la
+        duración esperada de un ciclo (120 días) pero mayor que cualquier
+        fluctuación de corto plazo esperada dentro del ciclo.
+    prominencia_min : float
+        Profundidad mínima del valle relativa a sus vecinos, en las
+        mismas unidades que `serie` (EVI/LSWI). Filtra valles poco
+        profundos que no representan un verdadero fin de ciclo
+        (suelo desnudo / rastrojo) sino ruido dentro de la temporada.
+
+    Retorna
+    -------
+    list[tuple[pd.Timestamp, pd.Timestamp]]
+        Lista de (fecha_inicio_segmento, fecha_fin_segmento), uno por
+        cada ciclo candidato detectado entre valles consecutivos.
+    """
+    valores = serie.to_numpy()
+    fechas = serie.index
+
+    valles_idx, propiedades = find_peaks(
+        -valores,
+        distance=distancia_min_dias,
+        prominence=prominencia_min,
+    )
+
+    if len(valles_idx) < 2:
+        # No hay suficientes valles para delimitar un ciclo completo;
+        # toda la serie es un único segmento candidato.
+        return [(fechas[0], fechas[-1])]
+
+    segmentos = []
+    for i in range(len(valles_idx) - 1):
+        inicio = fechas[valles_idx[i]]
+        fin = fechas[valles_idx[i + 1]]
+        segmentos.append((inicio, fin))
+
+    return segmentos
