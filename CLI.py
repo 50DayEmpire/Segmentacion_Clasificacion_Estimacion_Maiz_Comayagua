@@ -345,18 +345,21 @@ def _menu_prediccion() -> None:
     while True:
         _seccion("3 · Motor de Predicción")
         key = _menu({
-            "completo":  "Pipeline completo (descarga inteligente + predicción)",
-            "memoria":   "Predicción desde índices en BD (sin re-descargar)",
+            "completo":  "Pipeline completo (BD + openEO para gaps)",
+            "desde_bd":  "Pipeline desde BD (sin openEO, re-procesa ciclo ya ingestado)",
+            "memoria":   "Núcleo desde índices en memoria",
         })
         if key == "0":
             return
         elif key == "completo":
             _accion_pipeline_completo()
-        elif key == "memoria":
+        elif key == "desde_bd":
             _accion_pipeline_desde_bd()
+        elif key == "memoria":
+            _accion_pipeline_desde_memoria()
 
 def _accion_pipeline_completo() -> None:
-    _seccion("Pipeline completo end-to-end")
+    _seccion("Pipeline completo  [BD + openEO para gaps]")
     ciclo = _elegir_ciclo()
     fecha_inicio, fecha_fin = _pedir_fechas(ciclo)
     geojson = _cargar_geojson_parcelas()
@@ -374,7 +377,24 @@ def _accion_pipeline_completo() -> None:
     _pausar()
 
 def _accion_pipeline_desde_bd() -> None:
-    _seccion("Predicción desde índices en BD")
+    _seccion("Pipeline desde BD  [sin conexión openEO]")
+    ciclo = _elegir_ciclo()
+    fecha_inicio, fecha_fin = _pedir_fechas(ciclo)
+    from pipeline.motor_prediccion import ejecutar_pipeline_desde_bd
+    try:
+        resultados = ejecutar_pipeline_desde_bd(
+            fecha_inicio=fecha_inicio,
+            fecha_fin=fecha_fin,
+        )
+    except ValueError as exc:
+        _error(str(exc))
+        _info("Usa la opción 'Pipeline completo' para descargar los datos faltantes.")
+        _pausar(); return
+    _mostrar_resumen_rendimiento(resultados["rendimiento"])
+    _pausar()
+
+def _accion_pipeline_desde_memoria() -> None:
+    _seccion("Núcleo desde índices en memoria")
     _info("Cargando índices crudos desde series_diarias_vpm…")
 
     try:
@@ -390,7 +410,6 @@ def _accion_pipeline_desde_bd() -> None:
     df_evi = dfs_crudos["EVI"]
     _ok(f"Índices cargados: {df_evi.shape[0]} fechas × {df_evi.shape[1]} parcelas.")
 
-    # Pedir fechas y datos climáticos
     fecha_inicio = str(df_evi.index.min().date())
     fecha_fin    = _pedir("Fecha fin (YYYY-MM-DD)", str(df_evi.index.max().date()))
 
