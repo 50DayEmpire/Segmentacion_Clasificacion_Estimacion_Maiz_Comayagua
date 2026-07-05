@@ -367,7 +367,7 @@ def _accion_pipeline_completo() -> None:
     geojson = _cargar_geojson_parcelas()
     conn_cdse = _conectar_openeo_cdse()
     conn_fed  = _conectar_openeo_fed()
-    from pipeline.motor_prediccion import ejecutar_pipeline_completo
+    from pipeline.flujos_trabajo import ejecutar_pipeline_completo
     resultados = ejecutar_pipeline_completo(
         connection=conn_cdse,
         connection_fed=conn_fed,
@@ -382,7 +382,7 @@ def _accion_pipeline_desde_bd() -> None:
     _seccion("Pipeline desde BD  [sin conexión openEO]")
     ciclo = _elegir_ciclo()
     fecha_inicio, fecha_fin = _pedir_fechas(ciclo)
-    from pipeline.motor_prediccion import ejecutar_pipeline_desde_bd
+    from pipeline.flujos_trabajo import ejecutar_pipeline_desde_bd
     try:
         resultados = ejecutar_pipeline_desde_bd(
             fecha_inicio=fecha_inicio,
@@ -421,7 +421,7 @@ def _accion_pipeline_desde_memoria() -> None:
     from pipeline.ingesta import obtener_clima
     dfs_clima = obtener_clima(conn_fed, geojson, fecha_inicio, fecha_fin)
 
-    from pipeline.motor_prediccion import calcular_rendimiento_desde_indices
+    from pipeline.flujos_trabajo import calcular_rendimiento_desde_indices
     resultados = calcular_rendimiento_desde_indices(
         dfs_crudos=dfs_crudos,
         dfs_clima=dfs_clima,
@@ -1124,6 +1124,319 @@ def _accion_segmentar_ciclos() -> None:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# SECCIÓN 7 — Worker Diario
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _menu_worker() -> None:
+    while True:
+        _seccion("7 · Worker Diario")
+        key = _menu({
+            "configurar":    "Configurar worker",
+            "estado":        "Estado del worker",
+            "ejecutar":      "Ejecutar ahora",
+            "simular":       "Simular con fecha pasada",
+            "ver_log":       "Ver log del worker",
+            "registrar":     "Registrar tarea en Windows Scheduler",
+            "desregistrar":  "Desregistrar tarea del Windows Scheduler",
+        })
+        if key == "0":
+            return
+        elif key == "configurar":
+            _accion_worker_configurar()
+        elif key == "estado":
+            _accion_worker_estado()
+        elif key == "ejecutar":
+            _accion_worker_ejecutar()
+        elif key == "simular":
+            _accion_worker_simular()
+        elif key == "ver_log":
+            _accion_worker_ver_log()
+        elif key == "registrar":
+            _accion_worker_registrar()
+        elif key == "desregistrar":
+            _accion_worker_desregistrar()
+
+
+def _cargar_worker_modulo():
+    """Importa pipeline.worker con manejo de error (Req 11.7)."""
+    try:
+        import pipeline.worker as worker_mod
+        return worker_mod
+    except Exception as exc:
+        _error(f"No se pudo cargar pipeline/worker.py: {exc}")
+        return None
+
+
+def _accion_worker_configurar() -> None:
+    """Req 11.2 — Muestra y permite modificar worker_config.json."""
+    _seccion("Configurar worker")
+    worker_mod = _cargar_worker_modulo()
+    if worker_mod is None:
+        _pausar(); return
+
+    try:
+        cfg = worker_mod.cargar_config()
+    except ValueError as exc:
+        _error(str(exc))
+        _pausar(); return
+
+    cfg_original = dict(cfg)
+
+    _info("Configuración actual:")
+    for k, v in cfg.items():
+        print(f"    {k}: {v}")
+
+    print()
+    _info("Deja en blanco para mantener el valor actual.")
+
+    # activo
+    raw = _pedir("activo (true/false)", str(cfg.get("activo", False)).lower())
+    cfg["activo"] = raw.lower() in ("true", "1", "s", "si", "yes")
+
+    # hora_ejecucion
+    while True:
+        raw = _pedir("hora_ejecucion (HH:MM)", cfg.get("hora_ejecucion", "06:00"))
+        parts = raw.split(":")
+        if (
+            len(parts) == 2
+            and parts[0].isdigit() and parts[1].isdigit()
+            and 0 <= int(parts[0]) <= 23
+            and 0 <= int(parts[1]) <= 59
+        ):
+            cfg["hora_ejecucion"] = raw
+            break
+        _warn("Formato inválido. Usa HH:MM (ej: 06:00).")
+
+    # ventana_busqueda_dias
+    while True:
+        raw = _pedir("ventana_busqueda_dias (1-30)", str(cfg.get("ventana_busqueda_dias", 7)))
+        if raw.isdigit() and 1 <= int(raw) <= 30:
+            cfg["ventana_busqueda_dias"] = int(raw)
+            break
+        _warn("Debe ser un entero entre 1 y 30.")
+
+    # temporada_activa
+    while True:
+        raw = _pedir("temporada_activa (primera/postrera)", cfg.get("temporada_activa", "primera"))
+        if raw in ("primera", "postrera"):
+            cfg["temporada_activa"] = raw
+            break
+        _warn("Debe ser 'primera' o 'postrera'.")
+
+    # factor_sos
+    while True:
+        raw = _pedir("factor_sos (0.0-1.0)", str(cfg.get("factor_sos", 0.2)))
+        try:
+            f = float(raw)
+            if 0.0 <= f <= 1.0:
+                cfg["factor_sos"] = f
+                break
+            _warn("Debe estar entre 0.0 y 1.0.")
+        except ValueError:
+            _warn(f"'{raw}' no es un número válido.")
+
+    scheduler_cambio = (
+        cfg.get("activo") != cfg_original.get("activo")
+        or cfg.get("hora_ejecucion") != cfg_original.get("hora_ejecucion")
+    )
+
+    if scheduler_cambio:
+        if cfg.get("activo"):
+            _info("Sincronizando con Windows Task Scheduler…")
+            ok, msg = worker_mod.sincronizar_scheduler_con_config(cfg)
+            if not ok:
+                _error(msg)
+                _warn("No se guardó la configuración: el Scheduler no pudo actualizarse.")
+                _pausar(); return
+            _ok(msg)
+        else:
+            if worker_mod.esta_registrado_en_scheduler():
+                _info("Desregistrando del Windows Task Scheduler…")
+                ok, msg = worker_mod.desregistrar_de_scheduler()
+                if not ok:
+                    _error(msg)
+                    _warn("No se guardó la configuración: no se pudo eliminar la tarea.")
+                    _pausar(); return
+                _ok(msg)
+
+    try:
+        worker_mod.guardar_config(cfg)
+        _ok("Configuración guardada en worker_config.json.")
+    except Exception as exc:
+        _error(f"Error guardando configuración: {exc}")
+
+    _pausar()
+
+
+def _accion_worker_estado() -> None:
+    """Req 11.3 — Muestra el estado actual del worker."""
+    _seccion("Estado del worker")
+    worker_mod = _cargar_worker_modulo()
+    if worker_mod is None:
+        _pausar(); return
+
+    try:
+        cfg = worker_mod.cargar_config()
+    except ValueError as exc:
+        _error(str(exc))
+        _pausar(); return
+
+    activo  = cfg.get("activo", False)
+    hora    = cfg.get("hora_ejecucion", "06:00")
+    ult_ej  = cfg.get("ultima_ejecucion") or "—"
+    ult_ok  = cfg.get("ultima_ejecucion_exitosa") or "—"
+    prox    = cfg.get("proxima_ejecucion") or "—"
+    en_sched = worker_mod.esta_registrado_en_scheduler()
+
+    print()
+    print(f"  Estado activo          : {'✅ Activo' if activo else '❌ Inactivo'}")
+    print(f"  Hora de ejecución      : {hora}")
+    print(f"  Última ejecución       : {ult_ej}")
+    print(f"  Última ejecución ok    : {ult_ok}")
+    print(f"  Próxima ejecución      : {prox}")
+    print(f"  En Windows Scheduler   : {'✅ Sí' if en_sched else '❌ No'}")
+    _pausar()
+
+
+def _accion_worker_ejecutar() -> None:
+    """Req 11.4 — Ejecuta el worker con la fecha del sistema."""
+    _seccion("Ejecutar worker ahora")
+    worker_mod = _cargar_worker_modulo()
+    if worker_mod is None:
+        _pausar(); return
+
+    _info("Ejecutando worker con la fecha del sistema…")
+    try:
+        resumen = worker_mod.ejecutar(fecha_hoy=None)
+    except Exception as exc:
+        _error(f"Error durante la ejecución: {exc}")
+        _pausar(); return
+
+    _ok("Ejecución completada.")
+    print()
+    print(f"  Ciclos procesados      : {resumen['ciclos_procesados']}")
+    print(f"  Fechas ingestadas      : {resumen['fechas_ingestadas']}")
+    print(f"  Predicciones generadas : {resumen['predicciones_generadas']}")
+    print(f"  Duración               : {resumen['duracion_segundos']:.1f} s")
+    if resumen["errores"]:
+        _warn(f"Errores: {len(resumen['errores'])}")
+        for e in resumen["errores"]:
+            print(f"    • {e}")
+    _pausar()
+
+
+def _accion_worker_simular() -> None:
+    """Req 11.5 / Req 12 — Simula la ejecución con una fecha pasada."""
+    _seccion("Simular con fecha pasada")
+    worker_mod = _cargar_worker_modulo()
+    if worker_mod is None:
+        _pausar(); return
+
+    fecha_sim = _pedir_fecha("Fecha simulada (YYYY-MM-DD)", "2025-08-15")
+
+    _info(f"Simulando ejecución con fecha={fecha_sim} (sin conexión a openEO)…")
+    try:
+        resumen = worker_mod.ejecutar(fecha_hoy=fecha_sim)
+    except Exception as exc:
+        _error(f"Error durante la simulación: {exc}")
+        _pausar(); return
+
+    _ok(f"Simulación completada para fecha={fecha_sim}.")
+    print()
+    print(f"  Ciclos procesados      : {resumen['ciclos_procesados']}")
+    print(f"  Predicciones generadas : {resumen['predicciones_generadas']}")
+    print(f"  Duración               : {resumen['duracion_segundos']:.1f} s")
+    if resumen["errores"]:
+        _warn(f"Errores: {len(resumen['errores'])}")
+        for e in resumen["errores"]:
+            print(f"    • {e}")
+    _pausar()
+
+
+def _accion_worker_registrar() -> None:
+    """Registra el worker en Windows Task Scheduler."""
+    _seccion("Registrar tarea en Windows Scheduler")
+    worker_mod = _cargar_worker_modulo()
+    if worker_mod is None:
+        _pausar(); return
+
+    if worker_mod.esta_registrado_en_scheduler():
+        _warn("La tarea ya está registrada. Se actualizará la hora.")
+
+    hora = _pedir("Hora de ejecución (HH:MM)", "06:00")
+    ok, msg = worker_mod.registrar_en_scheduler(hora)
+    if ok:
+        _ok(msg)
+        cfg = worker_mod.cargar_config()
+        cfg["activo"] = True
+        cfg["hora_ejecucion"] = hora
+        worker_mod.guardar_config(cfg)
+    else:
+        _error(msg)
+    _pausar()
+
+
+def _accion_worker_desregistrar() -> None:
+    """Desregistra el worker de Windows Task Scheduler."""
+    _seccion("Desregistrar tarea del Windows Scheduler")
+    worker_mod = _cargar_worker_modulo()
+    if worker_mod is None:
+        _pausar(); return
+
+    if not worker_mod.esta_registrado_en_scheduler():
+        _warn("No hay tarea registrada en el Scheduler.")
+        _pausar(); return
+
+    confirmar = _pedir("¿Desregistrar la tarea? (s/n)", "n")
+    if confirmar.lower() != "s":
+        _info("Cancelado.")
+        _pausar(); return
+
+    ok, msg = worker_mod.desregistrar_de_scheduler()
+    if ok:
+        _ok(msg)
+        cfg = worker_mod.cargar_config()
+        cfg["activo"] = False
+        worker_mod.guardar_config(cfg)
+    else:
+        _error(msg)
+    _pausar()
+
+
+def _accion_worker_ver_log() -> None:
+    """Req 11.6 — Muestra las últimas N líneas del log del día."""
+    _seccion("Ver log del worker")
+    from datetime import date as _date
+
+    raw_n = _pedir("Número de líneas a mostrar (0 = ninguna)", "50")
+    try:
+        n_lines = int(raw_n)
+    except ValueError:
+        _warn("Valor inválido, usando 50.")
+        n_lines = 50
+
+    if n_lines == 0:
+        _info("Se solicitaron 0 líneas. No se mostrará nada.")
+        _pausar(); return
+
+    log_path = ROOT / "logs" / f"worker_{_date.today().strftime('%Y-%m-%d')}.log"
+
+    if not log_path.exists():
+        _warn("No hay log de ejecución para la fecha actual.")
+        _pausar(); return
+
+    try:
+        lines = log_path.read_text(encoding="utf-8").splitlines()
+        ultimas = lines[-n_lines:] if len(lines) >= n_lines else lines
+        print()
+        for l in ultimas:
+            print(f"  {l}")
+    except Exception as exc:
+        _error(f"Error leyendo el log: {exc}")
+    _pausar()
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # MENÚ PRINCIPAL
 # ══════════════════════════════════════════════════════════════════════════════
 
@@ -1134,6 +1447,7 @@ _MENU_PRINCIPAL = {
     "fenologico":  "Módulo fenológico (SOS, ciclos)",
     "bd":          "Inspección de la base de datos SQLite",
     "diagnostico": "Diagnóstico del proyecto",
+    "worker":      "Worker Diario (automatización)",
 }
 
 def main() -> None:
@@ -1160,6 +1474,8 @@ def main() -> None:
             _menu_bd()
         elif key == "diagnostico":
             _menu_diagnostico()
+        elif key == "worker":
+            _menu_worker()
 
 
 if __name__ == "__main__":

@@ -1,5 +1,13 @@
+from __future__ import annotations
+
+from contextlib import closing
+from datetime import timedelta
+
 import numpy as np
 import pandas as pd
+
+from config import DIAS_VENTANAS
+from utils.conexionDB import get_connection_raw
 
 def detectar_sos(
     serie,
@@ -241,6 +249,89 @@ def detectar_sos_por_parcela(
     columnas_orden = ["id_parcela", "sos_fecha", "sos_valor", "pos_fecha",
                     "pos_valor", "base_valor", "amplitud", "umbral"]
     return pd.DataFrame(filas)[columnas_orden]
+
+
+def persistir_sos_y_ventanas(id_ciclo: int, sos_mediana: pd.Timestamp) -> None:
+    """
+    Persiste SOS y fechas de ventana T1/T2/T3 en ``produccion_acumulada_ciclo``.
+    Solo actualiza filas cuyo ``sos`` aún es NULL (idempotencia).
+    """
+    sos_mediana = pd.Timestamp(sos_mediana).normalize()
+    t1 = sos_mediana + timedelta(days=DIAS_VENTANAS["T1"])
+    t2 = sos_mediana + timedelta(days=DIAS_VENTANAS["T2"])
+    t3 = sos_mediana + timedelta(days=DIAS_VENTANAS["T3"])
+
+    sql = """
+        UPDATE produccion_acumulada_ciclo
+        SET sos = ?, t1 = ?, t2 = ?, t3 = ?
+        WHERE id_ciclo = ? AND sos IS NULL;
+    """
+    with closing(get_connection_raw()) as conn:
+        with conn:
+            conn.execute(sql, (
+                str(sos_mediana.date()),
+                str(t1.date()), str(t2.date()), str(t3.date()),
+                id_ciclo,
+            ))
+
+
+def detectar_y_persistir_sos_ciclo(
+    ciclo: dict,
+    dfs_vpm_por_parcela: dict[int, dict],
+    factor_sos: float = 0.2,
+) -> dict:
+    """
+    Detecta SOS por parcela, calcula la mediana entre parcelas con detección
+    exitosa y persiste SOS + ventanas T1/T2/T3 en BD.
+
+    Si el ciclo ya tiene ``sos`` establecido, lo retorna sin modificar BD.
+    """
+    if ciclo.get("sos") is not None:
+        return ciclo
+
+    id_ciclo = ciclo["id_ciclo"]
+    fechas_sos: list[pd.Timestamp] = []
+
+    for id_parcela, dfs_vpm in dfs_vpm_por_parcela.items():
+        col = f"id_{id_parcela}"
+        df_evi = dfs_vpm.get("EVI")
+        if df_evi is None or col not in df_evi.columns:
+            continue
+
+        serie = df_evi[col]
+        if serie.dropna().empty:
+            continue
+
+        try:
+            resultado = detectar_sos(
+                serie=serie.values,
+                fechas=serie.index,
+                factor=factor_sos,
+            )
+        except Exception:
+            continue
+
+        sos_fecha = resultado.get("sos_fecha")
+        if sos_fecha is not None:
+            fechas_sos.append(pd.Timestamp(sos_fecha))
+
+    if not fechas_sos:
+        return ciclo
+
+    sos_mediana = pd.Series(sorted(fechas_sos)).median()
+    persistir_sos_y_ventanas(id_ciclo, sos_mediana)
+
+    t1 = sos_mediana + timedelta(days=DIAS_VENTANAS["T1"])
+    t2 = sos_mediana + timedelta(days=DIAS_VENTANAS["T2"])
+    t3 = sos_mediana + timedelta(days=DIAS_VENTANAS["T3"])
+
+    return {
+        **ciclo,
+        "sos": str(sos_mediana.date()),
+        "t1": str(t1.date()),
+        "t2": str(t2.date()),
+        "t3": str(t3.date()),
+    }
 
 
 #===================================================================================================================

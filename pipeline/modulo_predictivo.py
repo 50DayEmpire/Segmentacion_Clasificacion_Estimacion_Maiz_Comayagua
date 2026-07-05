@@ -1,6 +1,11 @@
 import numpy as np
 import pandas as pd
+from contextlib import closing
+from datetime import date, datetime, timedelta
 from scipy.optimize import curve_fit
+
+from config import DURACION_CICLO
+from utils.conexionDB import get_connection_raw
 
 
 def _doble_logistica(t, vmin, vmax, S, mS, A, mA):
@@ -353,6 +358,221 @@ def guardar_climatologia_diaria(
 
     print(f"✅ Climatología actualizada: {len(filas)} filas (años {anio_min_incluido}-{anio_max_incluido}).")
     return len(filas)
+
+
+def climatologia_disponible() -> bool:
+    """True si ``climatologia_diaria`` tiene al menos una fila."""
+    try:
+        with closing(get_connection_raw()) as conn:
+            n = conn.execute("SELECT COUNT(*) FROM climatologia_diaria;").fetchone()[0]
+        return n > 0
+    except Exception:
+        return False
+
+
+def existe_prediccion_ventana(id_ciclo: int, ventana: str) -> bool:
+    """True si ya existe una predicción congelada para (id_ciclo, ventana)."""
+    sql = "SELECT 1 FROM predicciones_ventana WHERE id_ciclo=? AND ventana=? LIMIT 1;"
+    try:
+        with closing(get_connection_raw()) as conn:
+            row = conn.execute(sql, (id_ciclo, ventana)).fetchone()
+        return row is not None
+    except Exception:
+        return False
+
+
+def prediccion_congelada_antes_de(
+    id_ciclo: int,
+    ventana: str,
+    fecha_limite: date | str,
+) -> bool:
+    """
+    True si existe predicción con ``fecha_congelamiento`` anterior o igual a
+    ``fecha_limite`` (modo simulación — predicciones inmutables).
+    """
+    sql = """
+        SELECT 1 FROM predicciones_ventana
+        WHERE id_ciclo=? AND ventana=?
+          AND DATE(fecha_congelamiento) <= ?
+        LIMIT 1;
+    """
+    try:
+        with closing(get_connection_raw()) as conn:
+            row = conn.execute(
+                sql, (id_ciclo, ventana, str(fecha_limite)),
+            ).fetchone()
+        return row is not None
+    except Exception:
+        return False
+
+
+def _obtener_area_ha(id_parcela: int) -> float | None:
+    try:
+        with closing(get_connection_raw()) as conn:
+            row = conn.execute(
+                "SELECT area_ha FROM parcelas_vigentes WHERE id_parcela=?;",
+                (id_parcela,),
+            ).fetchone()
+        return float(row[0]) if row else None
+    except Exception:
+        return None
+
+
+def ejecutar_prediccion_ventana(
+    ciclo: dict,
+    ventana: str,
+    fecha_ventana: date,
+    dfs_vpm_por_parcela: dict[int, dict],
+    fecha_hoy: date,
+) -> dict | None:
+    """
+    Ejecuta el flujo VPM completo para una ventana T1/T2/T3 de un ciclo.
+
+    Persiste el resultado en ``predicciones_ventana`` y el tramo extrapolado
+    en ``series_extrapoladas_ventana``.
+
+    Retorna un dict con métricas de la predicción si fue exitosa, o None.
+    """
+    from pipeline.ingesta import cargar_clima_desde_bd
+    from pipeline.modulo_vpm import calcular_biomasa_y_rendimiento, calcular_gpp_vpm
+
+    id_ciclo   = ciclo["id_ciclo"]
+    id_parcela = ciclo["id_parcela"]
+    fecha_inicio_str = str(ciclo.get("fecha_inicio", ""))
+    sos_str    = ciclo.get("sos")
+    lswi_max   = ciclo.get("lswi_max")
+
+    if not sos_str:
+        return None
+
+    if not climatologia_disponible():
+        raise RuntimeError(
+            f"Climatología no disponible para ventana {ventana} del ciclo id_ciclo={id_ciclo}"
+        )
+
+    sos_ts = pd.Timestamp(sos_str)
+    eos_ts = sos_ts + timedelta(days=DURACION_CICLO)
+
+    clim_par  = obtener_climatologia("PAR")
+    clim_temp = obtener_climatologia("temperatura")
+
+    dfs_vpm = dfs_vpm_por_parcela.get(id_parcela)
+    if dfs_vpm is None:
+        return None
+
+    col = f"id_{id_parcela}"
+
+    serie_evi_obs  = (
+        dfs_vpm["EVI"][col].dropna()
+        if col in dfs_vpm["EVI"].columns else pd.Series(dtype=float)
+    )
+    serie_lswi_obs = (
+        dfs_vpm["LSWI"][col].dropna()
+        if col in dfs_vpm["LSWI"].columns else pd.Series(dtype=float)
+    )
+
+    serie_evi_ext,  _ = extender_serie_con_curva_parametrica(serie_evi_obs,  sos_ts, eos_ts)
+    serie_lswi_ext, _ = extender_serie_con_curva_parametrica(serie_lswi_obs, sos_ts, eos_ts)
+
+    df_evi_ext  = pd.DataFrame({col: serie_evi_ext})
+    df_lswi_ext = pd.DataFrame({col: serie_lswi_ext})
+
+    lswi_max_serie = float(serie_lswi_ext.max()) if not serie_lswi_ext.empty else None
+    lswi_max_usado = float(lswi_max) if lswi_max else lswi_max_serie
+
+    df_w_scalar = (
+        (1.0 + df_lswi_ext) / (1.0 + lswi_max_usado)
+        if lswi_max_usado else df_lswi_ext.copy()
+    )
+    df_fpar = 1.0 * df_evi_ext
+
+    dfs_veg_ext = {
+        "EVI":      df_evi_ext,
+        "LSWI":     df_lswi_ext,
+        "FPAR":     df_fpar,
+        "W_scalar": df_w_scalar,
+    }
+
+    try:
+        dfs_clima = cargar_clima_desde_bd(
+            fecha_inicio=fecha_inicio_str,
+            fecha_fin=str(fecha_hoy),
+            ids_parcelas=[id_parcela],
+        )
+        col_clima = col
+        serie_temp_real = dfs_clima["temperature-mean"][col_clima].dropna()
+        serie_rad_real  = dfs_clima["solar-radiation-flux"][col_clima].dropna()
+    except Exception:
+        serie_temp_real = pd.Series(dtype=float)
+        serie_rad_real  = pd.Series(dtype=float)
+
+    fechas_ext = serie_evi_ext.index
+    serie_temp_completa = construir_serie_climatica_prediccion(
+        pd.Timestamp(fecha_inicio_str), eos_ts, serie_temp_real, clim_temp,
+    ).reindex(fechas_ext)
+    serie_rad_completa = construir_serie_climatica_prediccion(
+        pd.Timestamp(fecha_inicio_str), eos_ts, serie_rad_real, clim_par,
+    ).reindex(fechas_ext)
+
+    dfs_clima_ext = {
+        "temperature-mean":     pd.DataFrame({col: serie_temp_completa}),
+        "solar-radiation-flux": pd.DataFrame({col: serie_rad_completa * 1e6}),
+    }
+
+    dfs_gpp = calcular_gpp_vpm(dfs_vegetacion=dfs_veg_ext, dfs_clima=dfs_clima_ext)
+    df_gpp_recortado = dfs_gpp["GPP"].loc[sos_ts:eos_ts]
+    resultado_rend   = calcular_biomasa_y_rendimiento(df_gpp_recortado)
+
+    yield_tha       = float(resultado_rend["yield_final_tha"].iloc[0])
+    yield_qq_ha     = yield_tha * 22.0458
+    gpp_acumulado   = float(dfs_gpp["GPP"][col].sum())
+    npp_acumulado   = float(resultado_rend["npp_diario"][col].sum())
+
+    area_ha = _obtener_area_ha(id_parcela)
+    yield_qq_parcela = yield_qq_ha * area_ha if area_ha else None
+
+    sql_ins = """
+        INSERT INTO predicciones_ventana
+            (id_ciclo, id_parcela, ventana, fecha_ventana,
+             lswi_max_efectivo_usado, gpp_acumulado, npp_acumulado,
+             rendimiento_estimado_qq_ha, rendimiento_estimado_qq_parcela,
+             fecha_congelamiento)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+        ON CONFLICT (id_ciclo, ventana) DO NOTHING;
+    """
+    id_prediccion = None
+    with closing(get_connection_raw()) as conn:
+        with conn:
+            cur = conn.execute(sql_ins, (
+                id_ciclo, id_parcela, ventana, str(fecha_ventana),
+                lswi_max_usado, gpp_acumulado, npp_acumulado,
+                yield_qq_ha, yield_qq_parcela,
+            ))
+            if cur.rowcount > 0:
+                id_prediccion = cur.lastrowid
+
+    if id_prediccion is not None:
+        ult_obs_evi  = serie_evi_obs.index[-1]  if not serie_evi_obs.empty  else None
+        ult_obs_lswi = serie_lswi_obs.index[-1] if not serie_lswi_obs.empty else None
+
+        tramo_evi  = (
+            serie_evi_ext.loc[serie_evi_ext.index > ult_obs_evi]
+            if ult_obs_evi else None
+        )
+        tramo_lswi = (
+            serie_lswi_ext.loc[serie_lswi_ext.index > ult_obs_lswi]
+            if ult_obs_lswi else None
+        )
+        guardar_serie_extrapolada(id_prediccion, tramo_evi, tramo_lswi)
+
+    return {
+        "id_ciclo": id_ciclo,
+        "ventana": ventana,
+        "yield_qq_ha": yield_qq_ha,
+        "fecha_congelamiento": datetime.utcnow().isoformat(),
+        "parcelas_ok": 1 if id_prediccion is not None else 0,
+    }
+
 
 #=================================================================================================
 #                                      Experimental

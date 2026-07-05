@@ -104,6 +104,69 @@ def preprocesar_indices_vpm(
         "W_scalar": df_w_scalar,
     }
 
+def guardar_indices_suavizados(
+    id_ciclo: int,
+    id_parcela: int,
+    dfs_vpm: dict[str, pd.DataFrame],
+) -> int:
+    """
+    Upsert de EVI/LSWI suavizados en ``indices_suavizados``.
+
+    Parámetros
+    ----------
+    id_ciclo : int
+        Ciclo de producción al que pertenecen los índices.
+    id_parcela : int
+        Parcela procesada.
+    dfs_vpm : dict[str, pd.DataFrame]
+        Salida de ``preprocesar_indices_vpm``.
+
+    Retorna
+    -------
+    int
+        Número de filas escritas (0 si no hay datos válidos).
+    """
+    from contextlib import closing
+
+    col = f"id_{id_parcela}"
+    df_evi  = dfs_vpm.get("EVI")
+    df_lswi = dfs_vpm.get("LSWI")
+
+    if df_evi is None or col not in df_evi.columns:
+        return 0
+
+    sql = """
+        INSERT INTO indices_suavizados (id_ciclo, fecha, id_parcela, evi, lswi)
+        VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT (id_ciclo, fecha) DO UPDATE SET
+            evi  = excluded.evi,
+            lswi = excluded.lswi;
+    """
+    filas = []
+    for fecha, evi_val in df_evi[col].items():
+        lswi_val = None
+        if (
+            df_lswi is not None
+            and col in df_lswi.columns
+            and fecha in df_lswi.index
+        ):
+            lswi_val = float(df_lswi.loc[fecha, col])
+        filas.append((
+            id_ciclo,
+            str(pd.Timestamp(fecha).date()),
+            id_parcela,
+            float(evi_val),
+            lswi_val,
+        ))
+
+    if not filas:
+        return 0
+
+    with closing(get_connection_raw()) as conn:
+        with conn:
+            conn.executemany(sql, filas)
+
+    return len(filas)
 
 def calcular_gpp_vpm(
     dfs_vegetacion: dict[str, pd.DataFrame],

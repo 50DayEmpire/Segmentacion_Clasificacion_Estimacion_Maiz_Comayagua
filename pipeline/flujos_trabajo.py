@@ -1,4 +1,4 @@
-# pipeline/motor_prediccion.py — Orquestador de Predicción de Rendimiento
+# pipeline/flujos_trabajo.py — Orquestador de Predicción de Rendimiento
 """
 Motor de predicción de rendimiento de maíz para el Valle de Comayagua.
 
@@ -27,7 +27,7 @@ Flujos disponibles
 Uso típico
 ----------
     # Flujo 1 — conexión openEO solo si hay gaps en BD
-    from pipeline.motor_prediccion import ejecutar_pipeline_completo
+    from pipeline.flujos_trabajo import ejecutar_pipeline_completo
     resultados = ejecutar_pipeline_completo(
         connection=conn_cdse,
         connection_fed=conn_fed,
@@ -37,14 +37,14 @@ Uso típico
     )
 
     # Flujo 2 — completamente desde BD
-    from pipeline.motor_prediccion import ejecutar_pipeline_desde_bd
+    from pipeline.flujos_trabajo import ejecutar_pipeline_desde_bd
     resultados = ejecutar_pipeline_desde_bd(
         fecha_inicio="2025-05-01",
         fecha_fin="2025-10-30",
     )
 
     # Flujo 3 — DataFrames ya en memoria
-    from pipeline.motor_prediccion import calcular_rendimiento_desde_indices
+    from pipeline.flujos_trabajo import calcular_rendimiento_desde_indices
     resultados = calcular_rendimiento_desde_indices(
         dfs_crudos=dfs_crudos,
         dfs_clima=dfs_clima,
@@ -576,3 +576,42 @@ def calcular_rendimiento_desde_indices(
         "fenologia":   resultado["fenologia"],
         "rendimiento": resultado["rendimiento"],
     }
+
+
+# =============================================================================
+# Worker diario — consultas de ciclos activos
+# =============================================================================
+
+def obtener_ciclos_activos(
+    temporada_activa: str,
+    fecha_hoy,
+) -> list[dict]:
+    """
+    Retorna ciclos activos (``eos`` IS NULL, ``fecha_inicio`` <= fecha_hoy,
+    ``temporada`` = temporada_activa) desde ``produccion_acumulada_ciclo``.
+    """
+    from contextlib import closing
+    from utils.conexionDB import get_connection_raw
+
+    sql = """
+        SELECT id_ciclo, id_parcela, temporada, lswi_max,
+               sos, t1, t2, t3, eos, fecha_inicio, fecha_fin
+        FROM produccion_acumulada_ciclo
+        WHERE eos IS NULL
+          AND fecha_inicio IS NOT NULL
+          AND fecha_inicio <= ?
+          AND temporada = ?
+        ORDER BY id_ciclo;
+    """
+    cols = [
+        "id_ciclo", "id_parcela", "temporada", "lswi_max",
+        "sos", "t1", "t2", "t3", "eos", "fecha_inicio", "fecha_fin",
+    ]
+    try:
+        with closing(get_connection_raw()) as conn:
+            rows = conn.execute(
+                sql, (str(fecha_hoy), temporada_activa),
+            ).fetchall()
+        return [dict(zip(cols, r)) for r in rows]
+    except Exception:
+        return []

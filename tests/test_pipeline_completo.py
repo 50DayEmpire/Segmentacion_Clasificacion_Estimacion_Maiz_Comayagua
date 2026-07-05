@@ -1,5 +1,5 @@
 # tests/test_pipeline_completo.py
-# from pipeline.motor_prediccion import ejecutar_pipeline_completo
+# from pipeline.flujos_trabajo import ejecutar_pipeline_completo
 
 # def test_replay_produce_resultado_estable(conn_prueba):
 #     resultado = ejecutar_pipeline_completo(
