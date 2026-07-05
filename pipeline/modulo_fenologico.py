@@ -1,13 +1,13 @@
 import numpy as np
 import pandas as pd
 
-
 def detectar_sos(
     serie,
     fechas,
     factor=0.2,
     metodo="seasonal_amplitude",
     ventana_busqueda=None,
+    ventana_sos=None,
 ):
     """
     Detecta el Start of Season (SOS) en una serie temporal de un índice de vegetación
@@ -31,6 +31,11 @@ def detectar_sos(
         Si se provee, restringe la búsqueda de pico y SOS a esta ventana de fechas
         (ej. calendario primera/postrera de DICTA), evitando falsos positivos por
         verdor fuera de ciclo.
+    ventana_sos : tuple(datetime, datetime) o None
+        Si se provee, restringe adicionalmente la aceptación del cruce de SOS
+        a este sub-rango (ej. ventana de siembra institucional + buffer de
+        emergencia), independiente de ventana_busqueda usada para pico/base.
+        Si es None, se usa ventana_busqueda también para el cruce de SOS.
 
     Retorna
     -------
@@ -100,6 +105,14 @@ def detectar_sos(
 
     # --- Buscar primera fecha en la pendiente izquierda donde se cruza el umbral hacia arriba ---
     slope_izq_validos = slope_izq.dropna()
+
+    # Ventana angosta: restringe adicionalmente dónde se acepta el cruce de SOS
+    if ventana_sos is not None:
+        ini_sos, fin_sos = pd.to_datetime(ventana_sos[0]), pd.to_datetime(ventana_sos[1])
+        slope_izq_validos = slope_izq_validos.loc[
+            (slope_izq_validos.index >= ini_sos) & (slope_izq_validos.index <= fin_sos)
+        ]
+
     cruce = slope_izq_validos[slope_izq_validos >= umbral]
 
     if cruce.empty:

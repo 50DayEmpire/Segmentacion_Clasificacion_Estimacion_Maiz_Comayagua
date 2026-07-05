@@ -32,7 +32,6 @@ from pipeline.modulo_vpm import (
     calcular_biomasa_y_rendimiento,
 )
 from pipeline.modulo_fenologico import detectar_sos
-from utils.db import guardar_indices_crudos
 
 # ── Defaults de los parámetros del modelo VPM ─────────────────────────────────
 _VPM_DEFAULTS: dict = {
