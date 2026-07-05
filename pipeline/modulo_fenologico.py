@@ -28,7 +28,7 @@ def detectar_sos(
         'seasonal_amplitude' (único implementado en esta versión ligera;
         equivalente al método por defecto de TIMESAT).
     ventana_busqueda : tuple(datetime, datetime) o None
-        Si se provee, restringe la búsqueda de pico y SOS a esta ventana de fechas
+        Si se provee, restringe la búsqueda de pico y SOS a esta ventana de fechas 
         (ej. calendario primera/postrera de DICTA), evitando falsos positivos por
         verdor fuera de ciclo.
     ventana_sos : tuple(datetime, datetime) o None
@@ -130,6 +130,51 @@ def detectar_sos(
         "amplitud": amplitud,
         "umbral": umbral,
     }
+
+def extraer_serie_para_sos(
+    resultado_preprocesamiento: dict,
+    id_parcela,
+    indice: str = "EVI",
+) -> tuple:
+    """
+    Extrae la serie de valores y su índice de fechas para una parcela dada,
+    a partir del dict devuelto por ``preprocesar_indices_vpm``.
+
+    Parámetros
+    ----------
+    resultado_preprocesamiento : dict[str, pd.DataFrame]
+        Salida de preprocesar_indices_vpm (claves: "EVI", "LSWI", etc.).
+    id_parcela : str | int
+        Nombre de columna tal como aparece en el DataFrame (ej. "id_0" o 0).
+    indice : str
+        Clave del dict a usar, por defecto "EVI".
+
+    Retorna
+    -------
+    tuple(np.ndarray, pd.DatetimeIndex)
+        (valores, fechas) listos para pasar a detectar_sos.
+
+    Raises
+    ------
+    ValueError
+        Si la columna no existe o la serie no contiene ningún valor válido.
+    """
+    df = resultado_preprocesamiento[indice]
+
+    if id_parcela not in df.columns:
+        raise ValueError(
+            f"Columna '{id_parcela}' no encontrada en el DataFrame de {indice}. "
+            f"Columnas disponibles: {list(df.columns)}"
+        )
+
+    serie = df[id_parcela]
+    if serie.dropna().empty:
+        raise ValueError(
+            f"La serie de '{id_parcela}' ({indice}) no tiene observaciones válidas."
+        )
+
+    return serie.values, serie.index
+
 
 def detectar_sos_por_parcela(
     resultado_preprocesamiento: dict[str, pd.DataFrame],

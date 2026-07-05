@@ -16,6 +16,8 @@ import textwrap
 from contextlib import closing
 from pathlib import Path
 
+import pandas as pd
+
 # ── Asegurar que el root del proyecto esté en sys.path ────────────────────────
 ROOT = Path(__file__).resolve().parent
 if str(ROOT) not in sys.path:
@@ -628,6 +630,500 @@ def _accion_versiones() -> None:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# SECCIÓN 6 — Módulo Fenológico
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _menu_fenologico() -> None:
+    while True:
+        _seccion("6 · Módulo Fenológico")
+        key = _menu({
+            "sos_parcela":  "Detectar SOS para una parcela específica",
+            "sos_todas":    "Detectar SOS para todas las parcelas",
+            "ver_sos_bd":   "Ver SOS guardados en produccion_acumulada_ciclo",
+            "ciclos":       "Segmentar ciclos en serie multi-anual (experimental)",
+        })
+        if key == "0":
+            return
+        elif key == "sos_parcela":
+            _accion_sos_parcela()
+        elif key == "sos_todas":
+            _accion_sos_todas()
+        elif key == "ver_sos_bd":
+            _accion_ver_sos_bd()
+        elif key == "ciclos":
+            _accion_segmentar_ciclos()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Helpers internos del módulo fenológico
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _listar_parcelas_disponibles() -> list[int]:
+    """Devuelve lista de id_parcela con datos en series_diarias_vpm."""
+    try:
+        with closing(_get_conn()) as conn:
+            rows = conn.execute(
+                "SELECT DISTINCT id_parcela FROM series_diarias_vpm ORDER BY id_parcela;"
+            ).fetchall()
+        return [r[0] for r in rows]
+    except Exception:
+        return []
+
+
+def _pedir_parcela(disponibles: list[int]) -> int | None:
+    """Pide al usuario que seleccione un id_parcela de la lista disponible."""
+    if not disponibles:
+        _warn("No hay parcelas con datos en series_diarias_vpm.")
+        return None
+    print(f"\n  Parcelas disponibles: {disponibles}")
+    raw = _pedir("id_parcela", str(disponibles[0]))
+    try:
+        pid = int(raw)
+        if pid not in disponibles:
+            _warn(f"id_parcela {pid} no está en la lista de disponibles.")
+            return None
+        return pid
+    except ValueError:
+        _error(f"'{raw}' no es un número entero válido.")
+        return None
+
+
+def _pedir_factor() -> float:
+    """Pide el factor de amplitud para detectar_sos (0-1)."""
+    while True:
+        raw = _pedir("Factor de amplitud para SOS (0.0-1.0)", "0.2")
+        try:
+            f = float(raw)
+            if 0.0 <= f <= 1.0:
+                return f
+            _warn("El factor debe estar entre 0.0 y 1.0.")
+        except ValueError:
+            _error(f"'{raw}' no es un número válido.")
+
+
+def _pedir_ventana_sos_opcional(etiqueta: str = "ventana_sos") -> tuple | None:
+    """
+    Pide opcionalmente una ventana (fecha_ini, fecha_fin).
+    Devuelve None si el usuario deja el campo vacío.
+    """
+    print(f"\n  {etiqueta} — deja en blanco para no restringir.")
+    raw_ini = _pedir(f"  {etiqueta} inicio (YYYY-MM-DD)", "").strip()
+    if not raw_ini:
+        return None
+    raw_fin = _pedir(f"  {etiqueta} fin   (YYYY-MM-DD)", "").strip()
+    if not raw_fin:
+        return None
+    try:
+        ini = _normalizar_fecha(raw_ini)
+        fin = _normalizar_fecha(raw_fin)
+        return (ini, fin)
+    except ValueError as exc:
+        _error(str(exc))
+        return None
+
+
+def _preparar_resultado_preprocesamiento(
+    id_parcela: int,
+    fecha_inicio: str,
+    fecha_fin: str,
+) -> dict | None:
+    """
+    Carga índices crudos desde la BD para una parcela y los preprocesa
+    con Whittaker, devolviendo el dict listo para detectar_sos.
+    """
+    try:
+        from pipeline.ingesta import cargar_indices_desde_bd
+        dfs_crudos = cargar_indices_desde_bd(
+            fecha_inicio=fecha_inicio,
+            fecha_fin=fecha_fin,
+            ids_parcelas=[id_parcela],
+        )
+    except ValueError as exc:
+        _warn(str(exc))
+        return None
+    except Exception as exc:
+        _error(f"Error leyendo BD: {exc}")
+        return None
+
+    try:
+        from pipeline.modulo_vpm import preprocesar_indices_vpm
+        resultado = preprocesar_indices_vpm(dfs_crudos)
+    except Exception as exc:
+        _error(f"Error en preprocesamiento Whittaker: {exc}")
+        return None
+
+    return resultado
+
+
+def _mostrar_resultado_sos(res: dict, id_parcela: int | str = "") -> None:
+    """Imprime en consola el resultado de detectar_sos de forma legible."""
+    prefijo = f"  Parcela {id_parcela} — " if id_parcela != "" else "  "
+    sos = res.get("sos_fecha")
+    pos = res.get("pos_fecha")
+    if sos is None:
+        print(f"{prefijo}SOS no detectado  (amplitud={res.get('amplitud')})")
+        return
+
+    sos_str  = str(sos.date()) if hasattr(sos, "date") else str(sos)
+    pos_str  = str(pos.date()) if hasattr(pos, "date") else str(pos)
+    umbral   = res.get("umbral")
+    amplitud = res.get("amplitud")
+    print(
+        f"{prefijo}"
+        f"SOS={sos_str}  (val={res['sos_valor']:.4f})  |  "
+        f"Pico={pos_str}  (val={res['pos_valor']:.4f})  |  "
+        f"Umbral={umbral:.4f}  Amplitud={amplitud:.4f}"
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Acciones del módulo fenológico
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _accion_sos_parcela() -> None:
+    """
+    Detecta el Start of Season para una parcela específica.
+    Permite definir ventana_busqueda y ventana_sos de forma interactiva.
+    """
+    _seccion("Detectar SOS — parcela específica")
+
+    disponibles = _listar_parcelas_disponibles()
+    id_parcela = _pedir_parcela(disponibles)
+    if id_parcela is None:
+        _pausar(); return
+
+    ciclo = _elegir_ciclo()
+    fecha_inicio, fecha_fin = _pedir_fechas(ciclo)
+
+    indice = _pedir("Índice a usar (EVI / LSWI)", "EVI").upper()
+    if indice not in ("EVI", "LSWI"):
+        _warn("Índice no reconocido, usando EVI.")
+        indice = "EVI"
+
+    factor = _pedir_factor()
+
+    _info("ventana_busqueda — restringe la búsqueda de pico y base al calendario del ciclo.")
+    ventana_busqueda = _pedir_ventana_sos_opcional("ventana_busqueda")
+
+    _info("ventana_sos — sub-rango donde se acepta el cruce del umbral (siembra + emergencia).")
+    ventana_sos = _pedir_ventana_sos_opcional("ventana_sos")
+
+    _info("Cargando y preprocesando índices desde BD…")
+    resultado_prep = _preparar_resultado_preprocesamiento(id_parcela, fecha_inicio, fecha_fin)
+    if resultado_prep is None:
+        _pausar(); return
+
+    col = f"id_{id_parcela}"
+    df_indice = resultado_prep[indice]
+
+    if col not in df_indice.columns:
+        _error(f"Columna '{col}' no encontrada en el DataFrame de {indice}.")
+        _pausar(); return
+
+    serie  = df_indice[col].values
+    fechas = df_indice.index
+
+    from pipeline.modulo_fenologico import detectar_sos
+    res = detectar_sos(
+        serie=serie,
+        fechas=fechas,
+        factor=factor,
+        ventana_busqueda=ventana_busqueda,
+        ventana_sos=ventana_sos,
+    )
+
+    _seccion("Resultado SOS")
+    _mostrar_resultado_sos(res, id_parcela)
+
+    # Tabla completa de métricas
+    print()
+    print(f"  {'Campo':<18}  Valor")
+    print(f"  {'─'*18}  {'─'*30}")
+    for campo, val in res.items():
+        if hasattr(val, "date"):
+            val_str = str(val.date())
+        elif isinstance(val, float):
+            val_str = f"{val:.6f}"
+        else:
+            val_str = str(val) if val is not None else "—"
+        print(f"  {campo:<18}  {val_str}")
+
+    # Mostrar gráfico ASCII de la serie si es terminal que lo soporte
+    _mostrar_grafico_ascii_serie(df_indice[col], res, indice)
+
+    _pausar()
+
+
+def _mostrar_grafico_ascii_serie(
+    serie: "pd.Series",
+    res: dict,
+    indice: str = "EVI",
+) -> None:
+    """Dibuja un gráfico ASCII ligero de la serie con marcadores SOS y Pico."""
+    try:
+        import pandas as pd
+        ancho = 60
+        alto  = 10
+        s = serie.dropna()
+        if s.empty:
+            return
+
+        vmin, vmax = s.min(), s.max()
+        rng = vmax - vmin if (vmax - vmin) > 0 else 1.0
+
+        fechas_list = list(s.index)
+        vals_list   = list(s.values)
+        n = len(vals_list)
+        paso = max(1, n // ancho)
+
+        # Reducir a `ancho` puntos
+        puntos_x = list(range(0, n, paso))[:ancho]
+        puntos_v = [vals_list[i] for i in puntos_x]
+        puntos_f = [fechas_list[i] for i in puntos_x]
+
+        # Escalar a filas de alto
+        def _escalar(v):
+            return int((v - vmin) / rng * (alto - 1))
+
+        lienzo = [[" "] * len(puntos_x) for _ in range(alto)]
+
+        sos_col = pos_col = None
+        for j, (f, v) in enumerate(zip(puntos_f, puntos_v)):
+            fila = alto - 1 - _escalar(v)
+            lienzo[fila][j] = "·"
+            if res.get("sos_fecha") is not None:
+                if abs((pd.Timestamp(f) - pd.Timestamp(res["sos_fecha"])).days) < paso * 2:
+                    sos_col = j
+            if res.get("pos_fecha") is not None:
+                if abs((pd.Timestamp(f) - pd.Timestamp(res["pos_fecha"])).days) < paso * 2:
+                    pos_col = j
+
+        # Marcar SOS (S) y Pico (P)
+        if sos_col is not None:
+            fila_sos = alto - 1 - _escalar(res["sos_valor"])
+            fila_sos = max(0, min(alto - 1, fila_sos))
+            lienzo[fila_sos][sos_col] = "S"
+        if pos_col is not None:
+            fila_pos = alto - 1 - _escalar(res["pos_valor"])
+            fila_pos = max(0, min(alto - 1, fila_pos))
+            lienzo[fila_pos][pos_col] = "P"
+
+        # Línea de umbral
+        if res.get("umbral") is not None:
+            fila_u = alto - 1 - _escalar(res["umbral"])
+            fila_u = max(0, min(alto - 1, fila_u))
+            for j in range(len(puntos_x)):
+                if lienzo[fila_u][j] == " ":
+                    lienzo[fila_u][j] = "-"
+
+        print(f"\n  ── Gráfico {indice} (ASCII) ──  S=SOS  P=Pico  -=Umbral\n")
+        print(f"  {vmax:.3f} ┐")
+        for fila in lienzo:
+            print("         │" + "".join(fila))
+        print(f"  {vmin:.3f} └" + "─" * len(puntos_x))
+        fecha_ini = fechas_list[0].strftime("%Y-%m-%d")
+        fecha_fin = fechas_list[-1].strftime("%Y-%m-%d")
+        print(f"          {fecha_ini}{' ' * (len(puntos_x) - 20)}{fecha_fin}")
+    except Exception:
+        pass  # el gráfico es decorativo; no romper el flujo si falla
+
+
+def _accion_sos_todas() -> None:
+    """
+    Detecta SOS para todas las parcelas disponibles en la BD.
+    Permite una ventana_sos global y muestra tabla resumen.
+    """
+    _seccion("Detectar SOS — todas las parcelas")
+
+    ciclo = _elegir_ciclo()
+    fecha_inicio, fecha_fin = _pedir_fechas(ciclo)
+
+    indice = _pedir("Índice a usar (EVI / LSWI)", "EVI").upper()
+    if indice not in ("EVI", "LSWI"):
+        indice = "EVI"
+
+    factor = _pedir_factor()
+
+    _info("ventana_busqueda global — aplica a todas las parcelas (Enter = sin restricción).")
+    ventana_busqueda = _pedir_ventana_sos_opcional("ventana_busqueda")
+
+    _info("ventana_sos global — sub-rango de aceptación del cruce (Enter = sin restricción).")
+    ventana_sos_global = _pedir_ventana_sos_opcional("ventana_sos")
+
+    _info("Cargando índices de todas las parcelas desde BD…")
+    try:
+        from pipeline.ingesta import cargar_indices_desde_bd
+        dfs_crudos = cargar_indices_desde_bd(
+            fecha_inicio=fecha_inicio,
+            fecha_fin=fecha_fin,
+        )
+    except ValueError as exc:
+        _warn(str(exc))
+        _pausar(); return
+    except Exception as exc:
+        _error(f"Error leyendo BD: {exc}")
+        _pausar(); return
+
+    _info("Preprocesando (Whittaker)…")
+    try:
+        from pipeline.modulo_vpm import preprocesar_indices_vpm
+        resultado_prep = preprocesar_indices_vpm(dfs_crudos)
+    except Exception as exc:
+        _error(f"Error en preprocesamiento: {exc}")
+        _pausar(); return
+
+    from pipeline.modulo_fenologico import detectar_sos_por_parcela
+
+    # ventana_sos se pasa dentro del helper; construimos ventanas_busqueda
+    # como tuple global si el usuario la definió
+    df_sos = detectar_sos_por_parcela(
+        resultado_preprocesamiento=resultado_prep,
+        indice=indice,
+        factor=factor,
+        ventanas_busqueda=ventana_busqueda,
+    )
+
+    # Aplicar ventana_sos post-proceso si se definió (detectar_sos_por_parcela
+    # no la acepta globalmente, así que filtramos el resultado aquí)
+    if ventana_sos_global is not None:
+        ini_sos = pd.Timestamp(ventana_sos_global[0])
+        fin_sos = pd.Timestamp(ventana_sos_global[1])
+        fuera = (
+            df_sos["sos_fecha"].notna() &
+            ((df_sos["sos_fecha"] < ini_sos) | (df_sos["sos_fecha"] > fin_sos))
+        )
+        df_sos.loc[fuera, "sos_fecha"] = None
+        df_sos.loc[fuera, "sos_valor"] = None
+        if fuera.any():
+            _warn(
+                f"{fuera.sum()} parcela(s) con SOS fuera de ventana_sos "
+                f"[{ventana_sos_global[0]} → {ventana_sos_global[1]}] → marcadas como no detectado."
+            )
+
+    _seccion("Resultados SOS — resumen")
+    detectados  = df_sos["sos_fecha"].notna().sum()
+    sin_detectar = df_sos["sos_fecha"].isna().sum()
+    _info(f"Parcelas con SOS detectado: {detectados}  |  Sin detectar: {sin_detectar}")
+
+    print(f"\n  {'id_parcela':>12}  {'sos_fecha':>12}  {'sos_valor':>10}  {'pos_fecha':>12}  {'amplitud':>10}  {'umbral':>8}")
+    print(f"  {'─'*12}  {'─'*12}  {'─'*10}  {'─'*12}  {'─'*10}  {'─'*8}")
+    import pandas as pd
+    for _, row in df_sos.iterrows():
+        sos_f = str(row["sos_fecha"].date()) if pd.notna(row["sos_fecha"]) else "—"
+        pos_f = str(row["pos_fecha"].date()) if pd.notna(row["pos_fecha"]) else "—"
+        sv    = f"{row['sos_valor']:.4f}" if pd.notna(row.get("sos_valor")) else "—"
+        amp   = f"{row['amplitud']:.4f}"  if pd.notna(row.get("amplitud")) else "—"
+        umb   = f"{row['umbral']:.4f}"    if pd.notna(row.get("umbral"))   else "—"
+        print(f"  {str(row['id_parcela']):>12}  {sos_f:>12}  {sv:>10}  {pos_f:>12}  {amp:>10}  {umb:>8}")
+
+    # Estadísticas rápidas de la distribución de SOS
+    sos_validos = df_sos["sos_fecha"].dropna()
+    if not sos_validos.empty:
+        print()
+        _info(f"SOS más temprano : {sos_validos.min().date()}")
+        _info(f"SOS más tardío   : {sos_validos.max().date()}")
+        mediana = sos_validos.sort_values().iloc[len(sos_validos) // 2]
+        _info(f"SOS mediana      : {mediana.date()}")
+
+    _pausar()
+
+
+def _accion_ver_sos_bd() -> None:
+    """Consulta y muestra los SOS registrados en produccion_acumulada_ciclo."""
+    _seccion("SOS en produccion_acumulada_ciclo")
+    try:
+        import pandas as pd
+        with closing(_get_conn()) as conn:
+            df = pd.read_sql(
+                """
+                SELECT id_ciclo, id_parcela, temporada, sos, fecha_inicio, fecha_fin, rendimiento
+                FROM produccion_acumulada_ciclo
+                ORDER BY id_parcela, fecha_inicio
+                LIMIT 100;
+                """,
+                conn,
+            )
+        if df.empty:
+            _warn("No hay registros en produccion_acumulada_ciclo.")
+        else:
+            pd.set_option("display.max_columns", None)
+            pd.set_option("display.width", 130)
+            print()
+            print(df.to_string(index=False))
+            _info(f"{len(df)} fila(s).")
+    except Exception as exc:
+        _error(str(exc))
+    _pausar()
+
+
+def _accion_segmentar_ciclos() -> None:
+    """
+    Segmenta una serie EVI/LSWI multi-anual de una parcela en ciclos
+    individuales usando segmentar_ciclos (detección de valles).
+    """
+    _seccion("Segmentación de ciclos en serie multi-anual (experimental)")
+
+    disponibles = _listar_parcelas_disponibles()
+    id_parcela = _pedir_parcela(disponibles)
+    if id_parcela is None:
+        _pausar(); return
+
+    indice = _pedir("Índice a usar (EVI / LSWI)", "EVI").upper()
+    if indice not in ("EVI", "LSWI"):
+        indice = "EVI"
+
+    dist_raw = _pedir("Distancia mínima entre valles (días)", "90")
+    prom_raw = _pedir("Prominencia mínima del valle", "0.15")
+    try:
+        distancia_min = int(dist_raw)
+        prominencia   = float(prom_raw)
+    except ValueError:
+        _error("Valores inválidos, usando valores por defecto (90, 0.15).")
+        distancia_min, prominencia = 90, 0.15
+
+    _info("Cargando índices desde BD…")
+    try:
+        from pipeline.ingesta import cargar_indices_desde_bd
+        dfs_crudos = cargar_indices_desde_bd(ids_parcelas=[id_parcela])
+    except ValueError as exc:
+        _warn(str(exc)); _pausar(); return
+    except Exception as exc:
+        _error(str(exc)); _pausar(); return
+
+    try:
+        from pipeline.modulo_vpm import preprocesar_indices_vpm
+        resultado_prep = preprocesar_indices_vpm(dfs_crudos)
+    except Exception as exc:
+        _error(f"Error Whittaker: {exc}"); _pausar(); return
+
+    col = f"id_{id_parcela}"
+    df_indice = resultado_prep[indice]
+    if col not in df_indice.columns:
+        _error(f"Columna '{col}' no encontrada."); _pausar(); return
+
+    import pandas as pd
+    serie = df_indice[col].dropna()
+
+    from pipeline.modulo_fenologico import segmentar_ciclos
+    ciclos_detectados = segmentar_ciclos(
+        serie,
+        distancia_min_dias=distancia_min,
+        prominencia_min=prominencia,
+    )
+
+    _seccion("Ciclos detectados")
+    _info(f"Parcela {id_parcela} — {len(ciclos_detectados)} segmento(s) detectado(s):")
+    print()
+    print(f"  {'#':>4}  {'Inicio':>12}  {'Fin':>12}  {'Duración (días)':>16}")
+    print(f"  {'─'*4}  {'─'*12}  {'─'*12}  {'─'*16}")
+    for i, (ini, fin) in enumerate(ciclos_detectados, 1):
+        dur = (fin - ini).days
+        print(f"  {i:>4}  {str(ini.date()):>12}  {str(fin.date()):>12}  {dur:>16}")
+
+    _pausar()
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # MENÚ PRINCIPAL
 # ══════════════════════════════════════════════════════════════════════════════
 
@@ -635,6 +1131,7 @@ _MENU_PRINCIPAL = {
     "parcelas":    "Gestión de parcelas vigentes",
     "ingesta":     "Ingesta satelital y climática (openEO)",
     "prediccion":  "Motor de predicción de rendimiento",
+    "fenologico":  "Módulo fenológico (SOS, ciclos)",
     "bd":          "Inspección de la base de datos SQLite",
     "diagnostico": "Diagnóstico del proyecto",
 }
@@ -657,6 +1154,8 @@ def main() -> None:
             _menu_ingesta()
         elif key == "prediccion":
             _menu_prediccion()
+        elif key == "fenologico":
+            _menu_fenologico()
         elif key == "bd":
             _menu_bd()
         elif key == "diagnostico":

@@ -25,11 +25,6 @@ def conn_prueba(tmp_path, monkeypatch):
             area_ha REAL
         );
     """)
-    # Insertar registros dummy para que las FK funcionen
-    # conn.executemany(
-    #     "INSERT INTO parcelas_vigentes (id_parcela, area_ha) VALUES (?, ?);",
-    #     [(2, 2.5), (3, 3.0)]
-    # )
 
     def _get_connection_raw():
         return sqlite3.connect(str(db_path))
