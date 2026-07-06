@@ -24,6 +24,7 @@ import traceback
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any
+import pandas as pd
 
 ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
@@ -81,6 +82,29 @@ def _actualizar_campo_config(campo: str, valor: Any) -> None:
     cfg = cargar_config()
     cfg[campo] = valor
     guardar_config(cfg)
+
+
+def _calcular_proxima_ejecucion(cfg: dict[str, Any]) -> str:
+    """
+    Calcula la próxima fecha/hora de ejecución.
+
+    Si la hora de ejecución de hoy ya pasó, retorna mañana a esa hora;
+    si no, retorna hoy a esa hora.
+    """
+    hora = cfg.get("hora_ejecucion", "06:00")
+    try:
+        h, m = hora.split(":")
+        ahora = datetime.now()
+        hoy_ejec = datetime(ahora.year, ahora.month, ahora.day, int(h), int(m))
+        if ahora < hoy_ejec:
+            proxima = hoy_ejec
+        else:
+            proxima = hoy_ejec + timedelta(days=1)
+        return proxima.isoformat()
+    except (ValueError, IndexError):
+        return (datetime.now() + timedelta(days=1)).replace(
+            hour=6, minute=0, second=0, microsecond=0
+        ).isoformat()
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -506,6 +530,14 @@ def _finalizar_ejecucion(
 
 CONSECUTIVOS_REQUERIDOS = 3
 
+def _calcular_fechas_ciclo(sos_date: date) -> dict[str, date]:
+    """Deriva t1/t2/t3/eos de forma determinística a partir de SOS."""
+    return {
+        "t1":  sos_date + timedelta(days=30),
+        "t2":  sos_date + timedelta(days=60),
+        "t3":  sos_date + timedelta(days=90),
+        "eos": sos_date + timedelta(days=120),
+    }
 
 def _obtener_ventana_temporada(temporada: str, fecha_hoy: date) -> tuple[date, date] | None:
     """Retorna (inicio, fin) de la ventana de siembra para la temporada."""
@@ -629,31 +661,37 @@ def detectar_y_crear_ciclos_pendientes(
                     continue
 
                 # Validar no-solapamiento con ciclo activo de la temporada contraria
+                sos_date = sos_fecha.date() if hasattr(sos_fecha, "date") else sos_fecha
+                fechas_ciclo = _calcular_fechas_ciclo(sos_date)
+                eos_date = fechas_ciclo["eos"]
+
+                # Validar no-solapamiento con ciclo activo/candidato de la temporada
+                # contraria, comparando intervalos [sos, eos] reales, no ventanas
+                # de calendario.
                 sql_overlap = """
                     SELECT COUNT(*) FROM produccion_acumulada_ciclo
                     WHERE id_parcela = ?
                       AND temporada != ?
-                      AND eos IS NULL
-                      AND fecha_inicio IS NOT NULL AND fecha_fin IS NOT NULL
-                      AND NOT (fecha_fin < ? OR fecha_inicio > ?)
+                      AND estado_ciclo IN ('candidato', 'activo')
+                      AND sos IS NOT NULL
+                      AND NOT (
+                          COALESCE(eos, date(sos, '+120 days')) < ?
+                          OR sos > ?
+                      )
                 """
                 with closing(get_connection_raw()) as conn:
                     overlap = conn.execute(
-                        sql_overlap, (id_parcela, temporada_activa, str(fecha_ini_ventana), str(fecha_fin_ventana)),
+                        sql_overlap,
+                        (id_parcela, temporada_activa, str(sos_date), str(eos_date)),
                     ).fetchone()[0]
                 if overlap > 0:
                     _log_seguro(
                         logger, "warning",
-                        "Solapamiento detectado para id_parcela=%s. No se crea candidato.",
-                        id_parcela,
+                        "Solapamiento detectado para id_parcela=%s (sos=%s, eos=%s). "
+                        "No se crea candidato.",
+                        id_parcela, sos_date, eos_date,
                     )
                     continue
-
-                # Calcular id_ciclo
-                with closing(get_connection_raw()) as conn:
-                    max_id = conn.execute(
-                        "SELECT COALESCE(MAX(id_ciclo), 0) + 1 FROM produccion_acumulada_ciclo"
-                    ).fetchone()[0]
 
                 from pipeline.ingesta import cargar_indices_desde_bd
                 try:
@@ -667,26 +705,26 @@ def detectar_y_crear_ciclos_pendientes(
                 except ValueError:
                     lswi_max_val = None
 
-                sos_date = sos_fecha.date() if hasattr(sos_fecha, "date") else sos_fecha
-
                 sql_insert = """
                     INSERT INTO produccion_acumulada_ciclo
-                        (id_ciclo, id_parcela, temporada, lswi_max, sos,
-                         fecha_inicio, fecha_fin, estado_ciclo)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, 'candidato')
+                        (id_parcela, temporada, lswi_max, sos, t1, t2, t3, eos,
+                         estado_ciclo)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'candidato')
                 """
                 with closing(get_connection_raw()) as conn:
                     with conn:
-                        conn.execute(sql_insert, (
-                            max_id, id_parcela, temporada_activa, lswi_max_val,
-                            str(sos_date), str(fecha_ini_ventana), str(fecha_fin_ventana),
+                        cursor = conn.execute(sql_insert, (
+                            id_parcela, temporada_activa, lswi_max_val, str(sos_date),
+                            str(fechas_ciclo["t1"]), str(fechas_ciclo["t2"]),
+                            str(fechas_ciclo["t3"]), str(eos_date),
                         ))
+                        nuevo_id_ciclo = cursor.lastrowid
 
                 creados += 1
                 _log_seguro(
                     logger, "info",
-                    "Candidato creado: id_parcela=%s sos=%s id_ciclo=%s",
-                    id_parcela, sos_date, max_id,
+                    "Candidato creado: id_parcela=%s sos=%s eos=%s id_ciclo=%s",
+                    id_parcela, sos_date, eos_date, nuevo_id_ciclo,
                 )
 
             except Exception as exc:
@@ -698,11 +736,13 @@ def detectar_y_crear_ciclos_pendientes(
 
     # 4. Promover candidatos a activos si la señal persiste
     if not simulacion:
+        import pandas as pd  # requerido por pd.Timestamp más abajo
+
         for id_parcela in parcelas_candidato:
             try:
                 with closing(get_connection_raw()) as conn:
                     cand = conn.execute(
-                        """SELECT id_ciclo, sos, fecha_inicio, fecha_fin
+                        """SELECT id_ciclo, sos
                            FROM produccion_acumulada_ciclo
                            WHERE id_parcela = ? AND temporada = ? AND estado_ciclo = 'candidato'""",
                         (id_parcela, temporada_activa),
@@ -711,12 +751,12 @@ def detectar_y_crear_ciclos_pendientes(
                 if cand is None:
                     continue
 
-                id_ciclo_cand, sos_cand_db, fecha_ini_cand, fecha_fin_cand = cand
+                id_ciclo_cand, sos_cand_db = cand
 
                 from pipeline.ingesta import cargar_indices_desde_bd
                 try:
                     dfs = cargar_indices_desde_bd(
-                        fecha_inicio=str(fecha_ini_cand) if fecha_ini_cand else None,
+                        fecha_inicio=str(sos_cand_db) if sos_cand_db else None,
                         fecha_fin=str(fecha_hoy),
                         ids_parcelas=[id_parcela],
                     )
@@ -759,20 +799,19 @@ def detectar_y_crear_ciclos_pendientes(
                         racha_actual = 0
 
                 if racha_max >= CONSECUTIVOS_REQUERIDOS:
-                    sos_confirmado = str(pd.Timestamp(sos_cand_db).date()) if sos_cand_db else str(fecha_hoy)
                     with closing(get_connection_raw()) as conn:
                         with conn:
                             conn.execute(
                                 """UPDATE produccion_acumulada_ciclo
-                                   SET estado_ciclo = 'activo', fecha_inicio = ?
+                                   SET estado_ciclo = 'activo'
                                    WHERE id_ciclo = ? AND estado_ciclo = 'candidato'""",
-                                (sos_confirmado, id_ciclo_cand),
+                                (id_ciclo_cand,),
                             )
                     promovidos += 1
                     _log_seguro(
                         logger, "info",
                         "Candidato promovido a activo: id_parcela=%s id_ciclo=%s sos=%s racha=%d",
-                        id_parcela, id_ciclo_cand, sos_confirmado, racha_max,
+                        id_parcela, id_ciclo_cand, sos_cand_db, racha_max,
                     )
                 else:
                     _log_seguro(
@@ -887,6 +926,9 @@ def ejecutar(fecha_hoy: date | str | None = None) -> dict:
             _actualizar_campo_config(
                 "ultima_ejecucion_exitosa", datetime.utcnow().isoformat(),
             )
+            _actualizar_campo_config(
+                "proxima_ejecucion", _calcular_proxima_ejecucion(cfg),
+            )
         except Exception:
             pass
         return {
@@ -924,6 +966,9 @@ def ejecutar(fecha_hoy: date | str | None = None) -> dict:
     try:
         _actualizar_campo_config(
             "ultima_ejecucion_exitosa", datetime.utcnow().isoformat(),
+        )
+        _actualizar_campo_config(
+            "proxima_ejecucion", _calcular_proxima_ejecucion(cfg),
         )
     except Exception:
         pass

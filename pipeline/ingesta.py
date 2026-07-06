@@ -21,6 +21,7 @@ from config import ESCALA, BOA_OFFSET
 
 from utils.dict_a_dataframe import openeo_dict_to_dataframes
 from utils.conexionDB import get_connection_raw
+from contextlib import closing
 
 # ── Valores por defecto del proceso to_scl_dilation_mask ──────────────────────
 # Documentados aquí para que sean fácilmente referenciables y para que

@@ -145,25 +145,26 @@ def seeding(rutaGJSON: str) -> None:
             """)
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS produccion_acumulada_ciclo (
-                    id_ciclo         INTEGER NOT NULL,
-                    id_parcela       INTEGER NOT NULL,
-                    temporada        TEXT,
-                    lswi_max         REAL,
-                    sos              DATE,
-                    t1               DATE,
-                    t2               DATE,
-                    t3               DATE,
-                    eos              DATE,
-                    fecha_inicio     DATE,
-                    fecha_fin        DATE,
-                    rendimiento      REAL,
-                    produccion_total REAL,
-                    estado_ciclo     TEXT,
-                    PRIMARY KEY (id_ciclo),
-                    CHECK (estado_ciclo IN ('candidato', 'activo', 'finalizado'))
+                    id_ciclo          INTEGER PRIMARY KEY AUTOINCREMENT,
+                    id_parcela        INTEGER NOT NULL,
+                    temporada         TEXT NOT NULL,
+                    lswi_max          REAL,
+                    lswi_max_efectivo REAL,
+                    sos               DATE,
+                    t1                DATE,
+                    t2                DATE,
+                    t3                DATE,
+                    eos               DATE,
+                    rendimiento       REAL,
+                    produccion_total  REAL,
+                    estado_ciclo      TEXT NOT NULL DEFAULT 'candidato',
+                    CHECK (estado_ciclo IN ('candidato', 'activo', 'finalizado')),
+                    CHECK (temporada IN ('primera', 'postrera')),
                     FOREIGN KEY (id_parcela) REFERENCES parcelas_vigentes(id_parcela)
-                    UNIQUE (id_parcela, fecha_inicio, fecha_fin)
                 );
+                CREATE UNIQUE INDEX IF NOT EXISTS ux_ciclo_unico_no_finalizado
+                ON produccion_acumulada_ciclo (id_parcela, temporada)
+                WHERE estado_ciclo IN ('candidato', 'activo');
             """)
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS indices_suavizados(

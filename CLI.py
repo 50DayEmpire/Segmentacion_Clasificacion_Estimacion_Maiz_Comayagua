@@ -1259,6 +1259,13 @@ def _accion_worker_configurar() -> None:
                     _pausar(); return
                 _ok(msg)
 
+    # Recalcular próxima ejecución si el worker está activo
+    if cfg.get("activo"):
+        try:
+            cfg["proxima_ejecucion"] = worker_mod._calcular_proxima_ejecucion(cfg)
+        except Exception:
+            pass
+
     try:
         worker_mod.guardar_config(cfg)
         _ok("Configuración guardada en worker_config.json.")
@@ -1285,7 +1292,14 @@ def _accion_worker_estado() -> None:
     hora    = cfg.get("hora_ejecucion", "06:00")
     ult_ej  = cfg.get("ultima_ejecucion") or "—"
     ult_ok  = cfg.get("ultima_ejecucion_exitosa") or "—"
-    prox    = cfg.get("proxima_ejecucion") or "—"
+    prox    = cfg.get("proxima_ejecucion")
+    if not prox and activo:
+        try:
+            prox = worker_mod._calcular_proxima_ejecucion(cfg)
+        except Exception:
+            prox = "—"
+    else:
+        prox = prox or "—"
     en_sched = worker_mod.esta_registrado_en_scheduler()
 
     print()
