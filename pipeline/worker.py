@@ -229,12 +229,48 @@ def _conectar_openeo_fed():
     from config import OPENEOFED
     return openeo.connect(f"https://{OPENEOFED}").authenticate_oidc()
 
+def _calcular_ventana_ingesta(
+    id_parcela: int,
+    fecha_hoy: date,
+    dias_fallback_sin_historial: int,
+) -> tuple[str, str]:
+    """
+    Ventana dinámica de ingesta S2: desde el día siguiente a la última fecha
+    registrada en series_diarias_vpm para la parcela, hasta hoy. Garantiza
+    ingestar siempre al menos la(s) adquisición(es) más reciente(s) sin
+    reconsultar lo ya almacenado.
+
+    Si no hay historial (caso atípico para un ciclo ya activo, pero posible
+    si series_diarias_vpm se limpió o el ciclo es recién promovido), cae a
+    ``dias_fallback_sin_historial`` como red de seguridad.
+    """
+    from contextlib import closing
+    from utils.conexionDB import get_connection_raw
+
+    with closing(get_connection_raw()) as conn:
+        row = conn.execute(
+            "SELECT MAX(fecha) FROM series_diarias_vpm WHERE id_parcela = ?",
+            (id_parcela,),
+        ).fetchone()
+
+    ultima_fecha = row[0] if row and row[0] else None
+
+    if ultima_fecha:
+        fecha_ini = date.fromisoformat(str(ultima_fecha)) + timedelta(days=1)
+    else:
+        fecha_ini = fecha_hoy - timedelta(days=dias_fallback_sin_historial)
+
+    if fecha_ini > fecha_hoy:
+        fecha_ini = fecha_hoy  # ya al día; ventana mínima de 1 día
+
+    return fecha_ini.strftime("%Y-%m-%d"), fecha_hoy.strftime("%Y-%m-%d")
+
 
 def _detectar_nuevas_adquisiciones(
     ciclo: dict,
     geojson: dict,
     fecha_hoy: date,
-    ventana_busqueda_dias: int,
+    dias_fallback_sin_historial: int,
     logger: logging.Logger,
 ) -> list[date]:
     from pipeline.openeo_catalogo import (
@@ -244,14 +280,13 @@ def _detectar_nuevas_adquisiciones(
 
     id_ciclo   = ciclo["id_ciclo"]
     id_parcela = ciclo["id_parcela"]
-    fecha_ini  = (fecha_hoy - timedelta(days=ventana_busqueda_dias)).strftime("%Y-%m-%d")
-    fecha_fin  = fecha_hoy.strftime("%Y-%m-%d")
+    fecha_ini, fecha_fin = _calcular_ventana_ingesta(
+        id_parcela, fecha_hoy, dias_fallback_sin_historial,
+    )
 
     try:
         conn = _conectar_openeo_cdse()
-        fechas_catalogo = obtener_fechas_disponibles_s2(
-            conn, geojson, fecha_ini, fecha_fin,
-        )
+        fechas_catalogo = obtener_fechas_disponibles_s2(conn, geojson, fecha_ini, fecha_fin)
     except Exception as exc:
         _log_seguro(
             logger, "warning",
@@ -530,13 +565,60 @@ def _finalizar_ejecucion(
 
 CONSECUTIVOS_REQUERIDOS = 3
 
+MARGEN_DIAS_SIN_HISTORIAL_CANDIDATO   = 90   # si nunca hubo ciclo confirmado
+LIMITE_MAX_DIAS_HISTORIAL_CANDIDATO   = 180  # tope de lookback aunque el último EOS sea muy viejo
+
+
+def _calcular_ventana_busqueda_candidato(
+    id_parcela: int,
+    fecha_ini_ventana_calendario: date,
+    fecha_hoy: date,
+) -> tuple[str, str]:
+    """
+    Ventana de búsqueda histórica para detección de SOS candidato:
+    desde el día siguiente al último EOS confirmado de la parcela
+    (cualquier temporada), hasta hoy.
+
+    Si no existe ningún ciclo finalizado previo (cold start real), usa
+    como ancla el inicio de la ventana de calendario de la temporada
+    activa menos un margen, para tener suelo desnudo real que buscar.
+
+    Se acota a LIMITE_MAX_DIAS_HISTORIAL_CANDIDATO días hacia atrás como
+    máximo, para no escanear series completas de parcelas inactivas por años.
+    """
+    from contextlib import closing
+    from utils.conexionDB import get_connection_raw
+
+    with closing(get_connection_raw()) as conn:
+        row = conn.execute(
+            """SELECT MAX(eos) FROM produccion_acumulada_ciclo
+               WHERE id_parcela = ? AND estado_ciclo = 'finalizado' AND eos IS NOT NULL""",
+            (id_parcela,),
+        ).fetchone()
+
+    ultimo_eos = row[0] if row and row[0] else None
+
+    if ultimo_eos:
+        fecha_ini = date.fromisoformat(str(ultimo_eos)) + timedelta(days=1)
+    else:
+        fecha_ini = fecha_ini_ventana_calendario - timedelta(days=MARGEN_DIAS_SIN_HISTORIAL_CANDIDATO)
+
+    limite_min = fecha_hoy - timedelta(days=LIMITE_MAX_DIAS_HISTORIAL_CANDIDATO)
+    if fecha_ini < limite_min:
+        fecha_ini = limite_min
+    if fecha_ini > fecha_hoy:
+        fecha_ini = fecha_hoy
+
+    return fecha_ini.strftime("%Y-%m-%d"), fecha_hoy.strftime("%Y-%m-%d")
+
 def _calcular_fechas_ciclo(sos_date: date) -> dict[str, date]:
+    from config import DIAS_VENTANAS
     """Deriva t1/t2/t3/eos de forma determinística a partir de SOS."""
     return {
-        "t1":  sos_date + timedelta(days=30),
-        "t2":  sos_date + timedelta(days=60),
-        "t3":  sos_date + timedelta(days=90),
-        "eos": sos_date + timedelta(days=120),
+        "t1":  sos_date + timedelta(days=DIAS_VENTANAS["T1"]),
+        "t2":  sos_date + timedelta(days=DIAS_VENTANAS["T2"]),
+        "t3":  sos_date + timedelta(days=DIAS_VENTANAS["T3"]),
+        "eos": sos_date + timedelta(days=DIAS_VENTANAS["eos"]),
     }
 
 def _obtener_ventana_temporada(temporada: str, fecha_hoy: date) -> tuple[date, date] | None:
@@ -629,8 +711,9 @@ def detectar_y_crear_ciclos_pendientes(
 
         for id_parcela in pendientes:
             try:
-                fecha_ini_busq = (fecha_hoy - timedelta(days=ventana_busqueda_dias)).strftime("%Y-%m-%d")
-                fecha_fin_busq = fecha_hoy.strftime("%Y-%m-%d")
+                fecha_ini_busq, fecha_fin_busq = _calcular_ventana_busqueda_candidato(
+                    id_parcela, fecha_ini_ventana, fecha_hoy,
+                )
 
                 conn_cdse = _conectar_openeo_cdse()
                 from pipeline.ingesta import obtener_indices
@@ -875,6 +958,7 @@ def ejecutar(fecha_hoy: date | str | None = None) -> dict:
     temporada_activa      = cfg.get("temporada_activa", "primera")
     ventana_busqueda_dias = int(cfg.get("ventana_busqueda_dias", 7))
     factor_sos            = float(cfg.get("factor_sos", 0.2))
+    dias_fallback_ingesta = int(cfg.get("dias_fallback_sin_historial_ingesta", 7))
 
     if simulacion:
         _log_seguro(logger, "info", "MODO SIMULACIÓN — Fecha simulada: %s", fecha_hoy)
@@ -962,10 +1046,10 @@ def ejecutar(fecha_hoy: date | str | None = None) -> dict:
     _finalizar_ejecucion(
         logger, ts_inicio, ciclos_procesados, total_ingestadas, total_predicciones,
     )
-
+    from datetime import timezone
     try:
         _actualizar_campo_config(
-            "ultima_ejecucion_exitosa", datetime.utcnow().isoformat(),
+            "ultima_ejecucion_exitosa", datetime.now(timezone.utc).isoformat(),
         )
         _actualizar_campo_config(
             "proxima_ejecucion", _calcular_proxima_ejecucion(cfg),

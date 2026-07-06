@@ -162,9 +162,11 @@ def seeding(rutaGJSON: str) -> None:
                     CHECK (temporada IN ('primera', 'postrera')),
                     FOREIGN KEY (id_parcela) REFERENCES parcelas_vigentes(id_parcela)
                 );
+            """)
+            conn.execute("""
                 CREATE UNIQUE INDEX IF NOT EXISTS ux_ciclo_unico_no_finalizado
-                ON produccion_acumulada_ciclo (id_parcela, temporada)
-                WHERE estado_ciclo IN ('candidato', 'activo');
+                    ON produccion_acumulada_ciclo (id_parcela, temporada)
+                    WHERE estado_ciclo IN ('candidato', 'activo');
             """)
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS indices_suavizados(
