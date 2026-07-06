@@ -4,7 +4,8 @@ from pathlib import Path
 # ── Rutas ──────────────────────────────────────────────────────────────────────
 ROOT               = Path(__file__).parent
 GPKG_PATH          = ROOT / "data" / "pipeline.gpkg"
-MUNICIPIO_GEOJSON  = ROOT / "static" / "ComayaguaMunicipio.geojson"
+# MUNICIPIO_GEOJSON  = ROOT / "static" / "ComayaguaMunicipio.geojson"
+MUNICIPIO_GEOJSON  = ROOT / "static" / "ValleComayagua.geojson"
 
 # ── Endpoints ──────────────────────────────────────────────────────────────────
 OPENEO = "openeo.dataspace.copernicus.eu"

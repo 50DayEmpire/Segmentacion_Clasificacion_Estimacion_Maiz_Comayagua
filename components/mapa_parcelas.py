@@ -59,7 +59,7 @@ def _construir_mapa_base(centrar_en_estudio: bool) -> folium.Map:
     return mapa
 
 
-def render_mapa_parcelas(filtros: dict) -> None:
+def render_mapa_parcelas(filtros: dict) -> dict | None:
     """
     Renderiza el mapa interactivo de parcelas.
 
@@ -67,31 +67,37 @@ def render_mapa_parcelas(filtros: dict) -> None:
     ----------
     filtros : dict
         Claves: 'ciclo', 'ventana', 'modo_color'.
+
+    Retorna
+    -------
+    dict | None
+        Resultado de ``st_folium`` con ``last_object_clicked``.
     """
     ciclo      = filtros.get("ciclo", "primera")
     ventana    = filtros.get("ventana", "T1")
     modo_color = filtros.get("modo_color", "cultivo")
 
-    # ── Estado del botón de centrado ───────────────────────────────────────────
-    if "centrar_mapa" not in st.session_state:
-        st.session_state["centrar_mapa"] = False
+    # ── Estado del mapa (initial → idle / centering → idle) ──────────────────
+    if "mapa_estado" not in st.session_state:
+        st.session_state["mapa_estado"] = "initial"
+    if "centrar_revision" not in st.session_state:
+        st.session_state["centrar_revision"] = 0
 
     # ── Botón centrar área de estudio ──────────────────────────────────────────
     if st.button(
         "🎯 Centrar en área de estudio",
-        help="Ajusta el mapa para mostrar el municipio de Comayagua completo.",
+        help="Ajusta el mapa para mostrar el Valle de Comayagua completo.",
         use_container_width=False,
     ):
-        st.session_state["centrar_mapa"] = True
-
-    centrar = st.session_state["centrar_mapa"]
+        st.session_state["mapa_estado"] = "centering"
+        st.session_state["centrar_revision"] += 1
 
     # ── Cargar datos ───────────────────────────────────────────────────────────
     gdf_municipio = cargar_municipio()
     gdf_parcelas  = cargar_parcelas(layer=LAYERS_GPKG.get("parcelas", "parcelas_vigentes"))
 
     # ── Construir mapa base ────────────────────────────────────────────────────
-    mapa = _construir_mapa_base(centrar_en_estudio=centrar)
+    mapa = _construir_mapa_base(centrar_en_estudio=st.session_state["mapa_estado"] == "centering")
 
     # ── Capa 1: contorno del municipio ─────────────────────────────────────────
     if not gdf_municipio.empty:
@@ -109,6 +115,8 @@ def render_mapa_parcelas(filtros: dict) -> None:
         )
 
     # ── Capa 2: parcelas segmentadas ───────────────────────────────────────────
+    columnas_reales = [c for c in ["id_parcela", "area_ha", "area_m2"] if c in gdf_parcelas.columns]
+
     if gdf_parcelas.empty:
         st.warning(
             "No hay parcelas en la base de datos. "
@@ -125,7 +133,7 @@ def render_mapa_parcelas(filtros: dict) -> None:
                 nombre_capa="Parcelas — cultivo",
                 columna_color="cultivo",
                 mapa_colores=COLORES_CULTIVO,
-                columnas_popup=["id_parcela", "area_ha", "cultivo"],
+                columnas_popup=columnas_reales + ["cultivo"],
             )
         else:
             mapa = agregar_capa_poligonos(
@@ -134,17 +142,19 @@ def render_mapa_parcelas(filtros: dict) -> None:
                 nombre_capa="Parcelas — área",
                 color_borde=color,
                 color_relleno=color,
-                columnas_popup=["id_parcela", "area_ha", "area_m2"],
+                columnas_popup=columnas_reales,
             )
 
     # ── fit_bounds ─────────────────────────────────────────────────────────────
-    if centrar and not gdf_municipio.empty:
-        b = MUNICIPIO_BOUNDS          # [minx, miny, maxx, maxy]
+    estado = st.session_state["mapa_estado"]
+    if estado == "centering" and not gdf_municipio.empty:
+        b = MUNICIPIO_BOUNDS
         mapa.fit_bounds([[b[1], b[0]], [b[3], b[2]]])
-        st.session_state["centrar_mapa"] = False   # reset para la próxima carga
-    elif not gdf_parcelas.empty:
+        st.session_state["mapa_estado"] = "idle"
+    elif estado == "initial" and not gdf_parcelas.empty:
         b = gdf_parcelas.total_bounds
         mapa.fit_bounds([[b[1], b[0]], [b[3], b[2]]])
+        st.session_state["mapa_estado"] = "idle"
 
     # ── LayerControl ───────────────────────────────────────────────────────────
     folium.LayerControl(position="topright", collapsed=False).add_to(mapa)
@@ -169,10 +179,10 @@ def render_mapa_parcelas(filtros: dict) -> None:
     )
 
     # ── Renderizado con st_folium ──────────────────────────────────────────────
-    st_folium(
+    return st_folium(
         mapa,
         width="100%",
         height=560,
         returned_objects=["last_object_clicked"],
-        key=f"mapa_parcelas_{ciclo}_{ventana}_{modo_color}",
+        key=f"mapa_parcelas_{ciclo}_{ventana}_{modo_color}_v{st.session_state['centrar_revision']}",
     )

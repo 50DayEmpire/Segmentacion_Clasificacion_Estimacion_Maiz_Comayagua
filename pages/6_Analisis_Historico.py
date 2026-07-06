@@ -1,18 +1,16 @@
-# pages/1_Parcelas.py — Vista de mapa interactivo de parcelas
+# pages/6_Analisis_Historico.py — Análisis histórico multianual
 import streamlit as st
 from components.mapa_parcelas import render_mapa_parcelas
 from components.sidebar_filtros import render_filtros_parcelas
 from utils.queries import cargar_parcelas
 
-# ── Título ─────────────────────────────────────────────────────────────────────
-st.markdown("## 🗺️ Parcelas")
+st.markdown("## 📊 Análisis Histórico")
 st.markdown(
-    "Mapa interactivo de parcelas agrícolas segmentadas en el Valle de Comayagua. "
-    "Colorea por **cultivo clasificado** o por **rendimiento estimado** (qq/ha)."
+    "Exploración multianual de parcelas agrícolas en el Valle de Comayagua. "
+    "Visualiza la evolución de cultivos y rendimientos a lo largo de ciclos pasados."
 )
 st.divider()
 
-# ── Filtros en el sidebar ──────────────────────────────────────────────────────
 with st.sidebar:
     filtros = render_filtros_parcelas()
     st.divider()
@@ -20,18 +18,17 @@ with st.sidebar:
         cargar_parcelas.clear()
         st.rerun()
 
-# ── Layout principal: mapa + panel lateral de detalle ─────────────────────────
 col_mapa, col_detalle = st.columns([3, 1], gap="medium")
 
 with col_mapa:
     resultado = render_mapa_parcelas(filtros)
 
 with col_detalle:
-    st.markdown("#### Detalle de parcela")
+    st.markdown("#### Detalle histórico")
 
     clicked = (resultado or {}).get("last_object_clicked")
-    if clicked and isinstance(clicked, dict) and "id_parcela" in clicked:
-        props = clicked
+    if clicked and clicked.get("properties"):
+        props = clicked["properties"]
         for k, v in props.items():
             if k.startswith("_"):
                 continue
@@ -53,20 +50,14 @@ with col_detalle:
                 pid = int(props["id_parcela"])
                 fila = gdf[gdf["id_parcela"] == pid]
                 if not fila.empty:
-                    area_ha = fila.iloc[0].get("area_ha", None)
-                    area_m2 = fila.iloc[0].get("area_m2", None)
+                    area_ha = fila.iloc[0].get("area_ha")
+                    area_m2 = fila.iloc[0].get("area_m2")
                     if area_ha is not None:
                         st.metric("Área (ha)", f"{area_ha:.4f}")
                     if area_m2 is not None:
                         st.metric("Área (m²)", f"{area_m2:.2f}")
             except Exception:
                 pass
-        if "id_parcela" in props:
-            pid = int(props["id_parcela"])
-            st.markdown("---")
-            if st.button(f"📈 Ver Series Temporales — parcela {pid}", use_container_width=True):
-                st.session_state["parcela_series"] = pid
-                st.switch_page("pages/2_Series_Temporales.py")
     else:
         st.info(
             "Haz clic sobre una parcela en el mapa para ver su información.",
@@ -77,7 +68,6 @@ with col_detalle:
     st.markdown("##### Leyenda")
 
     modo = filtros.get("modo_color", "cultivo")
-
     if modo == "cultivo":
         from config import COLORES_CULTIVO
         for cultivo, color in COLORES_CULTIVO.items():

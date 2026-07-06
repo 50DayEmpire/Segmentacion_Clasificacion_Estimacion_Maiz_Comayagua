@@ -90,21 +90,36 @@ def agregar_capa_poligonos(
             "opacity":     opacidad_borde,
         }
 
-    # ── Tooltip y popup ────────────────────────────────────────────────────────
-    tooltip = None
-    popup   = None
+    # ── Tooltip y popup via onEachFeature ─────────────────────────────────────
+    # Usamos on_each_feather para que streamlit-folium pueda capturar
+    # last_object_clicked con propiedades (no solo lat/lng).
+    tooltip  = None
+    on_each  = None
 
     if cols_existentes and mostrar_tooltip:
         tooltip = folium.GeoJsonTooltip(
-            fields=cols_existentes[:3],          # máximo 3 campos en tooltip
+            fields=cols_existentes[:3],
             aliases=[f"{c}:" for c in cols_existentes[:3]],
             localize=True,
-            sticky=False,
         )
-        popup = folium.GeoJsonPopup(
-            fields=cols_existentes,
-            localize=True,
+        html_parts = "".join(
+            f" + '<b>{c}:</b> ' + feature.properties['{c}'] + '<br>'"
+            for c in cols_existentes
         )
+        # Importante: streamlit-folium siempre setea last_object_clicked = t.latlng
+        # en su onLayerClick. Usamos Promise.resolve().then() como microtask para
+        # sobrescribir con feature.properties DESPUÉS de onLayerClick pero
+        # ANTES de updateComponentValue (250ms debounce).
+        on_each = folium.JsCode(f"""
+        function(feature, layer) {{
+            layer.bindPopup('<div style="min-width:120px;">' {html_parts} + '</div>');
+            layer.on('click', function(e) {{
+                Promise.resolve().then(function() {{
+                    window.__GLOBAL_DATA__.last_object_clicked = feature.properties;
+                }});
+            }});
+        }}
+        """)
 
     # ── Añadir capa al mapa ────────────────────────────────────────────────────
     grupo = folium.FeatureGroup(name=nombre_capa, show=True)
@@ -112,8 +127,8 @@ def agregar_capa_poligonos(
     folium.GeoJson(
         gdf,
         style_function=_style,
+        on_each_feature=on_each,
         tooltip=tooltip,
-        popup=popup,
         name=nombre_capa,
     ).add_to(grupo)
 
