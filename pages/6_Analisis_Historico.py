@@ -3,6 +3,7 @@ import streamlit as st
 from components.mapa_parcelas import render_mapa_parcelas
 from components.sidebar_filtros import render_filtros_parcelas
 from utils.queries import cargar_parcelas
+from config import ANIOS_HISTORICO
 
 st.markdown("## 📊 Análisis Histórico")
 st.markdown(
@@ -65,34 +66,13 @@ with col_detalle:
         )
 
     st.markdown("---")
-    st.markdown("##### Leyenda")
 
-    modo = filtros.get("modo_color", "cultivo")
-    if modo == "cultivo":
-        from config import COLORES_CULTIVO
-        for cultivo, color in COLORES_CULTIVO.items():
-            etiqueta = cultivo.replace("_", " ").title()
-            st.markdown(
-                f"""
-                <div style='display:flex; align-items:center; gap:.6rem;
-                            padding:.2rem 0;'>
-                    <div style='width:14px; height:14px; border-radius:3px;
-                                background:{color}; flex-shrink:0;'></div>
-                    <span style='font-size:.85rem;'>{etiqueta}</span>
-                </div>
-                """,
-                unsafe_allow_html=True,
-            )
-    else:
-        st.markdown(
-            """
-            <div style='display:flex; justify-content:space-between;
-                        font-size:.8rem; color:#95a5a6; margin-bottom:.3rem;'>
-                <span>0 qq/ha</span><span>120 qq/ha</span>
-            </div>
-            <div style='height:14px; border-radius:4px;
-                        background:linear-gradient(to right, #2c3e50, #2ecc71);'>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
+# ── Línea de tiempo ────────────────────────────────────────────────────────────
+st.markdown("### 📅 Línea de tiempo")
+
+anio_seleccionado = st.select_slider(
+    "Selecciona el año histórico",
+    options=ANIOS_HISTORICO,
+    value=ANIOS_HISTORICO[-1],
+    key="timeline_anio",
+)

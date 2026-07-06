@@ -39,10 +39,6 @@ build/
 *.npz
 *.xml
 
-# ── Notebooks ─────────────────────────────────────────────────────────────────
-.ipynb_checkpoints/
-*.ipynb
-
 # ── Variables de entorno y secretos ───────────────────────────────────────────
 .env
 .env.*

@@ -60,6 +60,58 @@ def _construir_mapa_base(centrar_en_estudio: bool) -> folium.Map:
     return mapa
 
 
+def _agregar_css_no_select(mapa: folium.Map) -> None:
+    css = """
+    <style>
+        .leaflet-container, .leaflet-control-zoom, .leaflet-control-attribution,
+        .leaflet-control-layers, .leaflet-popup-content-wrapper,
+        .leaflet-control *, .leaflet-pane * {
+            user-select: none !important;
+            -webkit-user-select: none !important;
+            -moz-user-select: none !important;
+            -ms-user-select: none !important;
+        }
+    </style>"""
+    mapa.get_root().header.add_child(folium.Element(css))
+
+
+def _agregar_leyenda_flotante(mapa: folium.Map, modo_color: str) -> None:
+    if modo_color == "cultivo":
+        items = ""
+        for cultivo, color in COLORES_CULTIVO.items():
+            if cultivo not in ("maiz", "otro"):
+                continue
+            etiqueta = cultivo.replace("_", " ").title()
+            items += f"""
+            <div style="display:flex; align-items:center; gap:.6rem; padding:.2rem 0;">
+                <div style="width:14px;height:14px;border-radius:3px;background:{color};flex-shrink:0;"></div>
+                <span>{etiqueta}</span>
+            </div>"""
+        html = f"""
+        <div style="position:absolute;bottom:25px;right:20px;z-index:1000;
+                    background:rgba(26,29,35,.92);border:1px solid #2d3139;border-radius:8px;
+                    padding:.7rem 1rem;font-size:.85rem;color:#eee;min-width:120px;
+                    box-shadow:0 4px 15px rgba(0,0,0,.5);backdrop-filter:blur(4px);
+                    font-family:system-ui,-apple-system,sans-serif;">
+            <div style="font-weight:600;margin-bottom:.4rem;font-size:.9rem;border-bottom:1px solid #2d3139;padding-bottom:.3rem;">Leyenda</div>
+            {items}
+        </div>"""
+    else:
+        html = f"""
+        <div style="position:absolute;bottom:25px;right:20px;z-index:1000;
+                    background:rgba(26,29,35,.92);border:1px solid #2d3139;border-radius:8px;
+                    padding:.7rem 1rem;font-size:.85rem;color:#eee;min-width:140px;
+                    box-shadow:0 4px 15px rgba(0,0,0,.5);backdrop-filter:blur(4px);
+                    font-family:system-ui,-apple-system,sans-serif;">
+            <div style="font-weight:600;margin-bottom:.4rem;font-size:.9rem;border-bottom:1px solid #2d3139;padding-bottom:.3rem;">Rendimiento (qq/ha)</div>
+            <div style="display:flex;justify-content:space-between;font-size:.8rem;color:#95a5a6;margin-bottom:.15rem;">
+                <span>0</span><span>120</span>
+            </div>
+            <div style="height:12px;border-radius:4px;background:linear-gradient(to right,#2c3e50,#2ecc71);"></div>
+        </div>"""
+    mapa.get_root().html.add_child(folium.Element(html))
+
+
 def render_mapa_parcelas(filtros: dict) -> dict | None:
     """
     Renderiza el mapa interactivo de parcelas.
@@ -78,19 +130,20 @@ def render_mapa_parcelas(filtros: dict) -> dict | None:
     ventana    = filtros.get("ventana", "T1")
     modo_color = filtros.get("modo_color", "cultivo")
 
-    # ── Estado del mapa (initial → idle / centering → idle) ──────────────────
-    if "mapa_estado" not in st.session_state:
-        st.session_state["mapa_estado"] = "initial"
+    # ── Estado del mapa (centering → idle) ────────────────────────────────────
     if "centrar_revision" not in st.session_state:
         st.session_state["centrar_revision"] = 0
+    if "mapa_centrar_pendiente" not in st.session_state:
+        st.session_state["mapa_centrar_pendiente"] = False
 
     # ── Botón centrar área de estudio ──────────────────────────────────────────
     if st.button(
         "🎯 Centrar en área de estudio",
         help="Ajusta el mapa para mostrar el Valle de Comayagua completo.",
+        key="btn_centrar_mapa",
         use_container_width=False,
     ):
-        st.session_state["mapa_estado"] = "centering"
+        st.session_state["mapa_centrar_pendiente"] = True
         st.session_state["centrar_revision"] += 1
 
     # ── Cargar datos ───────────────────────────────────────────────────────────
@@ -98,7 +151,7 @@ def render_mapa_parcelas(filtros: dict) -> dict | None:
     gdf_parcelas  = cargar_parcelas(layer=LAYERS_GPKG.get("parcelas", "parcelas_vigentes"))
 
     # ── Construir mapa base ────────────────────────────────────────────────────
-    mapa = _construir_mapa_base(centrar_en_estudio=st.session_state["mapa_estado"] == "centering")
+    mapa = _construir_mapa_base(centrar_en_estudio=st.session_state["mapa_centrar_pendiente"])
 
     # ── Capa 1: contorno del municipio ─────────────────────────────────────────
     if not gdf_municipio.empty:
@@ -147,16 +200,15 @@ def render_mapa_parcelas(filtros: dict) -> dict | None:
                 columnas_popup=columnas_reales,
             )
 
-    # ── fit_bounds ─────────────────────────────────────────────────────────────
-    estado = st.session_state["mapa_estado"]
-    if estado == "centering" and not gdf_municipio.empty:
+    # ── fit_bounds (solo cuando se pulsa "Centrar") ────────────────────────────
+    if st.session_state["mapa_centrar_pendiente"] and not gdf_municipio.empty:
         b = MUNICIPIO_BOUNDS
         mapa.fit_bounds([[b[1], b[0]], [b[3], b[2]]])
-        st.session_state["mapa_estado"] = "idle"
-    elif estado == "initial" and not gdf_parcelas.empty:
-        b = gdf_parcelas.total_bounds
-        mapa.fit_bounds([[b[1], b[0]], [b[3], b[2]]])
-        st.session_state["mapa_estado"] = "idle"
+        st.session_state["mapa_centrar_pendiente"] = False
+
+    # ── Leyenda flotante y CSS ──────────────────────────────────────────────────
+    _agregar_css_no_select(mapa)
+    _agregar_leyenda_flotante(mapa, modo_color)
 
     # ── LayerControl ───────────────────────────────────────────────────────────
     folium.LayerControl(position="topright", collapsed=False).add_to(mapa)

@@ -29,6 +29,9 @@ CICLOS = {
 
 DURACION_CICLO = 120 # días — duración típica de un ciclo de cultivo de maíz en Comayagua
 
+# ── Años disponibles para análisis histórico ────────────────────────────────────
+ANIOS_HISTORICO = [2020, 2021, 2022, 2023, 2024, 2025]
+
 # ── Ventanas de predicción ─────────────────────────────────────────────────────
 VENTANAS = ["T1", "T2", "T3"]
 
@@ -56,9 +59,6 @@ COLORES_CICLO = {
 # ── Colores por cultivo clasificado ────────────────────────────────────────────
 COLORES_CULTIVO = {
     "maiz":       "#f1c40f",
-    "sorgo":      "#e74c3c",
-    "frijol":     "#8e44ad",
-    "pasto":      "#27ae60",
     "otro":       "#95a5a6",
     "sin_datos":  "#2c3e50",
 }
