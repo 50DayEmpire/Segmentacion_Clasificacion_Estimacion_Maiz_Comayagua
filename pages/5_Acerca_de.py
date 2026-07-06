@@ -1,7 +1,6 @@
-# pages/inicio.py — Página de bienvenida del observatorio
+# pages/5_Acerca_de.py — Información del sistema
 import streamlit as st
 
-# ── Cabecera ───────────────────────────────────────────────────────────────────
 col_logo, col_titulo = st.columns([1, 8])
 with col_logo:
     st.markdown("# 🌽")
@@ -21,7 +20,6 @@ with col_titulo:
 
 st.divider()
 
-# ── Cuerpo ─────────────────────────────────────────────────────────────────────
 col_izq, col_der = st.columns([3, 2], gap="large")
 
 with col_izq:
@@ -44,7 +42,6 @@ with col_izq:
         **quintales por parcela (qq/parcela)** para los ciclos *primera* y *postrera*.
         """
     )
-    st.info("📌 Selecciona una vista en el menú lateral para explorar el observatorio.")
 
 with col_der:
     st.markdown("### Ciclos de siembra")
@@ -105,52 +102,6 @@ with col_der:
         )
 
 st.divider()
-
-# ── Tarjetas de navegación ─────────────────────────────────────────────────────
-st.markdown("### Vistas disponibles")
-c1, c2, c3, c4 = st.columns(4, gap="medium")
-
-_card = (
-    "background:#1a1d23; border:1px solid #2d3139; border-radius:10px; "
-    "padding:1.1rem 1rem; height:160px;"
-)
-
-with c1:
-    st.markdown(
-        f"<div style='{_card} border-top:3px solid #2ecc71;'>"
-        "<div style='font-size:1.6rem;'>🗺️</div>"
-        "<div style='font-weight:700; margin:.4rem 0 .25rem;'>Parcelas</div>"
-        "<div style='color:#95a5a6; font-size:.85rem;'>Mapa interactivo coloreado "
-        "por cultivo o rendimiento estimado.</div></div>",
-        unsafe_allow_html=True,
-    )
-with c2:
-    st.markdown(
-        f"<div style='{_card} border-top:3px solid #3498db;'>"
-        "<div style='font-size:1.6rem;'>📈</div>"
-        "<div style='font-weight:700; margin:.4rem 0 .25rem;'>Series Temporales</div>"
-        "<div style='color:#95a5a6; font-size:.85rem;'>Curvas EVI, LSWI y GPP "
-        "con marcadores SOS y POS.</div></div>",
-        unsafe_allow_html=True,
-    )
-with c3:
-    st.markdown(
-        f"<div style='{_card} border-top:3px solid #e67e22;'>"
-        "<div style='font-size:1.6rem;'>⚖️</div>"
-        "<div style='font-weight:700; margin:.4rem 0 .25rem;'>Estimación</div>"
-        "<div style='color:#95a5a6; font-size:.85rem;'>qq/ha estimado vs referencia "
-        "SAG/CAN por ventana T1/T2/T3.</div></div>",
-        unsafe_allow_html=True,
-    )
-with c4:
-    st.markdown(
-        f"<div style='{_card} border-top:3px solid #9b59b6;'>"
-        "<div style='font-size:1.6rem;'>📊</div>"
-        "<div style='font-weight:700; margin:.4rem 0 .25rem;'>Resumen Valle</div>"
-        "<div style='color:#95a5a6; font-size:.85rem;'>Producción total agregada "
-        "en quintales y métricas de validación.</div></div>",
-        unsafe_allow_html=True,
-    )
 
 st.markdown(
     """

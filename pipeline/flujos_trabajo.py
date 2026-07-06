@@ -588,7 +588,8 @@ def obtener_ciclos_activos(
 ) -> list[dict]:
     """
     Retorna ciclos activos (``eos`` IS NULL, ``fecha_inicio`` <= fecha_hoy,
-    ``temporada`` = temporada_activa) desde ``produccion_acumulada_ciclo``.
+    ``temporada`` = temporada_activa, ``estado_ciclo`` = 'activo' o NULL por
+    compatibilidad hacia atrás) desde ``produccion_acumulada_ciclo``.
     """
     from contextlib import closing
     from utils.conexionDB import get_connection_raw
@@ -601,6 +602,7 @@ def obtener_ciclos_activos(
           AND fecha_inicio IS NOT NULL
           AND fecha_inicio <= ?
           AND temporada = ?
+          AND (estado_ciclo = 'activo' OR estado_ciclo IS NULL)
         ORDER BY id_ciclo;
     """
     cols = [

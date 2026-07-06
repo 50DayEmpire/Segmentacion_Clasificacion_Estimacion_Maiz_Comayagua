@@ -24,14 +24,16 @@ inyectar_estilos()
 
 pg = st.navigation(
     {
-        "Inicio": [
-            st.Page("pages/inicio.py", title="Inicio", icon="🏠", default=True),
+        "Parcelas": [
+            st.Page("pages/1_Parcelas.py", title="Parcelas", icon="🗺️", default=True),
         ],
         "Vistas": [
-            st.Page("pages/1_Parcelas.py",          title="Parcelas",          icon="🗺️"),
             st.Page("pages/2_Series_Temporales.py", title="Series Temporales", icon="📈"),
             st.Page("pages/3_Estimacion.py",        title="Estimación",        icon="⚖️"),
             st.Page("pages/4_Resumen_Valle.py",     title="Resumen Valle",     icon="📊"),
+        ],
+        "Acerca de": [
+            st.Page("pages/5_Acerca_de.py", title="Acerca de", icon="ℹ️"),
         ],
     }
 )

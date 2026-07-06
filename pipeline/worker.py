@@ -501,6 +501,297 @@ def _finalizar_ejecucion(
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# Detección de ciclos nuevos y promoción candidato → activo
+# ══════════════════════════════════════════════════════════════════════════════
+
+CONSECUTIVOS_REQUERIDOS = 3
+
+
+def _obtener_ventana_temporada(temporada: str, fecha_hoy: date) -> tuple[date, date] | None:
+    """Retorna (inicio, fin) de la ventana de siembra para la temporada."""
+    if temporada == "primera":
+        return date(fecha_hoy.year, 4, 1), date(fecha_hoy.year, 7, 31)
+    if temporada == "postrera":
+        return date(fecha_hoy.year, 8, 1), date(fecha_hoy.year + 1, 3, 31)
+    return None
+
+
+def detectar_y_crear_ciclos_pendientes(
+    temporada_activa: str,
+    fecha_hoy: date,
+    ventana_busqueda_dias: int,
+    factor_sos: float,
+    simulacion: bool,
+    logger: logging.Logger,
+) -> tuple[int, int]:
+    """
+    1. Identifica parcelas sin ciclo activo/candidato para la temporada actual
+       dentro de la ventana de siembra.
+    2. Para cada parcela pendiente: ingesta EVI reciente, corre SOS candidato
+       y crea un registro en ``produccion_acumulada_ciclo`` con
+       ``estado_ciclo = 'candidato'``.
+    3. Para cada candidato existente: verifica que la señal persista N
+       observaciones válidas consecutivas por encima del umbral; si cumple,
+       lo promueve a ``estado_ciclo = 'activo'``.
+
+    Retorna (candidatos_creados, candidatos_promovidos).
+    """
+    from contextlib import closing
+    from utils.conexionDB import get_connection_raw
+
+    ventana = _obtener_ventana_temporada(temporada_activa, fecha_hoy)
+    if ventana is None:
+        _log_seguro(logger, "warning", "Temporada '%s' no reconocida, se omite detección.", temporada_activa)
+        return 0, 0
+
+    fecha_ini_ventana, fecha_fin_ventana = ventana
+
+    if not (fecha_ini_ventana <= fecha_hoy <= fecha_fin_ventana):
+        _log_seguro(logger, "info", "Fecha actual fuera de la ventana de siembra de %s.", temporada_activa)
+        return 0, 0
+
+    # 1. Obtener parcelas vigentes
+    with closing(get_connection_raw()) as conn:
+        parcelas = [r[0] for r in conn.execute("SELECT id_parcela FROM parcelas_vigentes").fetchall()]
+
+    if not parcelas:
+        return 0, 0
+
+    # 2. Obtener ciclos existentes (candidato + activo) para la temporada
+    placeholders = ",".join(["?" for _ in parcelas])
+    sql_existentes = f"""
+        SELECT id_parcela, estado_ciclo, id_ciclo
+        FROM produccion_acumulada_ciclo
+        WHERE id_parcela IN ({placeholders})
+          AND temporada = ?
+          AND (
+              estado_ciclo IN ('candidato', 'activo')
+              OR (estado_ciclo IS NULL AND eos IS NULL)
+          )
+    """
+    with closing(get_connection_raw()) as conn:
+        existentes = conn.execute(sql_existentes, (*parcelas, temporada_activa)).fetchall()
+
+    parcelas_con_ciclo = {r[0] for r in existentes}
+    parcelas_candidato = {r[0] for r in existentes if r[1] == 'candidato'}
+
+    pendientes = [p for p in parcelas if p not in parcelas_con_ciclo]
+    if not pendientes and not parcelas_candidato:
+        _log_seguro(logger, "info", "Todas las parcelas ya tienen ciclo activo o candidato para %s.", temporada_activa)
+        return 0, 0
+
+    _log_seguro(
+        logger, "info",
+        "Ciclos pendientes: %d | Candidatos a promover: %d",
+        len(pendientes), len(parcelas_candidato),
+    )
+
+    creados = 0
+    promovidos = 0
+
+    # 3. Crear candidatos para parcelas pendientes
+    if pendientes and not simulacion:
+        geojson = _cargar_geojson_parcelas()
+        if not geojson:
+            _log_seguro(logger, "error", "No se pudo cargar GeoJSON para detección de ciclos.")
+
+        for id_parcela in pendientes:
+            try:
+                fecha_ini_busq = (fecha_hoy - timedelta(days=ventana_busqueda_dias)).strftime("%Y-%m-%d")
+                fecha_fin_busq = fecha_hoy.strftime("%Y-%m-%d")
+
+                conn_cdse = _conectar_openeo_cdse()
+                from pipeline.ingesta import obtener_indices
+                dfs = obtener_indices(conn_cdse, geojson, fecha_ini_busq, fecha_fin_busq)
+
+                from pipeline.modulo_vpm import preprocesar_indices_vpm
+                dfs_vpm = preprocesar_indices_vpm(dfs)
+
+                col = f"id_{id_parcela}"
+                df_evi = dfs_vpm["EVI"]
+                if col not in df_evi.columns:
+                    continue
+
+                serie = df_evi[col].dropna()
+                if len(serie) < 3:
+                    continue
+
+                from pipeline.modulo_fenologico import detectar_sos
+                resultado = detectar_sos(
+                    serie=serie.values,
+                    fechas=serie.index,
+                    factor=factor_sos,
+                    ventana_busqueda=(fecha_ini_busq, fecha_fin_busq),
+                )
+
+                sos_fecha = resultado.get("sos_fecha")
+                if sos_fecha is None:
+                    continue
+
+                # Validar no-solapamiento con ciclo activo de la temporada contraria
+                sql_overlap = """
+                    SELECT COUNT(*) FROM produccion_acumulada_ciclo
+                    WHERE id_parcela = ?
+                      AND temporada != ?
+                      AND eos IS NULL
+                      AND fecha_inicio IS NOT NULL AND fecha_fin IS NOT NULL
+                      AND NOT (fecha_fin < ? OR fecha_inicio > ?)
+                """
+                with closing(get_connection_raw()) as conn:
+                    overlap = conn.execute(
+                        sql_overlap, (id_parcela, temporada_activa, str(fecha_ini_ventana), str(fecha_fin_ventana)),
+                    ).fetchone()[0]
+                if overlap > 0:
+                    _log_seguro(
+                        logger, "warning",
+                        "Solapamiento detectado para id_parcela=%s. No se crea candidato.",
+                        id_parcela,
+                    )
+                    continue
+
+                # Calcular id_ciclo
+                with closing(get_connection_raw()) as conn:
+                    max_id = conn.execute(
+                        "SELECT COALESCE(MAX(id_ciclo), 0) + 1 FROM produccion_acumulada_ciclo"
+                    ).fetchone()[0]
+
+                from pipeline.ingesta import cargar_indices_desde_bd
+                try:
+                    dfs_completo = cargar_indices_desde_bd(ids_parcelas=[id_parcela])
+                    df_lswi = dfs_completo["LSWI"]
+                    lswi_max_val = (
+                        float(df_lswi[col].max())
+                        if col in df_lswi.columns and not df_lswi[col].isna().all()
+                        else None
+                    )
+                except ValueError:
+                    lswi_max_val = None
+
+                sos_date = sos_fecha.date() if hasattr(sos_fecha, "date") else sos_fecha
+
+                sql_insert = """
+                    INSERT INTO produccion_acumulada_ciclo
+                        (id_ciclo, id_parcela, temporada, lswi_max, sos,
+                         fecha_inicio, fecha_fin, estado_ciclo)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, 'candidato')
+                """
+                with closing(get_connection_raw()) as conn:
+                    with conn:
+                        conn.execute(sql_insert, (
+                            max_id, id_parcela, temporada_activa, lswi_max_val,
+                            str(sos_date), str(fecha_ini_ventana), str(fecha_fin_ventana),
+                        ))
+
+                creados += 1
+                _log_seguro(
+                    logger, "info",
+                    "Candidato creado: id_parcela=%s sos=%s id_ciclo=%s",
+                    id_parcela, sos_date, max_id,
+                )
+
+            except Exception as exc:
+                _log_seguro(
+                    logger, "error",
+                    "Error creando candidato id_parcela=%s: %s", id_parcela, exc,
+                )
+                continue
+
+    # 4. Promover candidatos a activos si la señal persiste
+    if not simulacion:
+        for id_parcela in parcelas_candidato:
+            try:
+                with closing(get_connection_raw()) as conn:
+                    cand = conn.execute(
+                        """SELECT id_ciclo, sos, fecha_inicio, fecha_fin
+                           FROM produccion_acumulada_ciclo
+                           WHERE id_parcela = ? AND temporada = ? AND estado_ciclo = 'candidato'""",
+                        (id_parcela, temporada_activa),
+                    ).fetchone()
+
+                if cand is None:
+                    continue
+
+                id_ciclo_cand, sos_cand_db, fecha_ini_cand, fecha_fin_cand = cand
+
+                from pipeline.ingesta import cargar_indices_desde_bd
+                try:
+                    dfs = cargar_indices_desde_bd(
+                        fecha_inicio=str(fecha_ini_cand) if fecha_ini_cand else None,
+                        fecha_fin=str(fecha_hoy),
+                        ids_parcelas=[id_parcela],
+                    )
+                except ValueError:
+                    continue
+
+                col = f"id_{id_parcela}"
+                df_evi = dfs["EVI"]
+                if col not in df_evi.columns:
+                    continue
+
+                serie = df_evi[col].dropna()
+                if sos_cand_db:
+                    serie = serie.loc[serie.index >= pd.Timestamp(sos_cand_db)]
+
+                if len(serie) < 3:
+                    continue
+
+                s = serie.sort_index()
+                pos_idx = s.idxmax()
+                slope_izq = s.loc[s.index <= pos_idx] if not s.empty else s
+                if slope_izq.empty:
+                    continue
+
+                base_valor = slope_izq.min()
+                pos_valor = s.max()
+                amplitud = pos_valor - base_valor
+                if amplitud <= 0:
+                    continue
+
+                umbral = base_valor + factor_sos * amplitud
+
+                racha_max = 0
+                racha_actual = 0
+                for val in (s >= umbral):
+                    if val:
+                        racha_actual += 1
+                        racha_max = max(racha_max, racha_actual)
+                    else:
+                        racha_actual = 0
+
+                if racha_max >= CONSECUTIVOS_REQUERIDOS:
+                    sos_confirmado = str(pd.Timestamp(sos_cand_db).date()) if sos_cand_db else str(fecha_hoy)
+                    with closing(get_connection_raw()) as conn:
+                        with conn:
+                            conn.execute(
+                                """UPDATE produccion_acumulada_ciclo
+                                   SET estado_ciclo = 'activo', fecha_inicio = ?
+                                   WHERE id_ciclo = ? AND estado_ciclo = 'candidato'""",
+                                (sos_confirmado, id_ciclo_cand),
+                            )
+                    promovidos += 1
+                    _log_seguro(
+                        logger, "info",
+                        "Candidato promovido a activo: id_parcela=%s id_ciclo=%s sos=%s racha=%d",
+                        id_parcela, id_ciclo_cand, sos_confirmado, racha_max,
+                    )
+                else:
+                    _log_seguro(
+                        logger, "debug",
+                        "Candidato id_parcela=%s aún no cumple racha: %d/%d",
+                        id_parcela, racha_max, CONSECUTIVOS_REQUERIDOS,
+                    )
+
+            except Exception as exc:
+                _log_seguro(
+                    logger, "error",
+                    "Error promoviendo candidato id_parcela=%s: %s", id_parcela, exc,
+                )
+                continue
+
+    return creados, promovidos
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # Punto de entrada principal
 # ══════════════════════════════════════════════════════════════════════════════
 
@@ -538,7 +829,8 @@ def ejecutar(fecha_hoy: date | str | None = None) -> dict:
     ts_inicio = datetime.utcnow()
     try:
         _actualizar_campo_config("ultima_ejecucion", ts_inicio.isoformat())
-    except Exception:
+    except Exception as exc:
+        _log_seguro(logger, "warning", "No se pudo actualizar config: %s", exc)
         pass
 
     temporada_activa      = cfg.get("temporada_activa", "primera")
@@ -561,6 +853,26 @@ def ejecutar(fecha_hoy: date | str | None = None) -> dict:
     total_predicciones = 0
     errores: list[str] = []
 
+    # ── Detectar parcelas sin ciclo y promover candidatos ────────────────────
+    try:
+        creados, promovidos = detectar_y_crear_ciclos_pendientes(
+            temporada_activa=temporada_activa,
+            fecha_hoy=fecha_hoy,
+            ventana_busqueda_dias=ventana_busqueda_dias,
+            factor_sos=factor_sos,
+            simulacion=simulacion,
+            logger=logger,
+        )
+        if creados or promovidos:
+            _log_seguro(
+                logger, "info",
+                "Ciclos: %d candidatos creados, %d promovidos a activo.",
+                creados, promovidos,
+            )
+    except Exception as exc:
+        _log_seguro(logger, "error", "Error en detección de ciclos pendientes: %s", exc)
+
+    # ── Obtener ciclos activos (incluye los recién promovidos) ───────────────
     ciclos_activos = obtener_ciclos_activos(temporada_activa, fecha_hoy)
     _log_seguro(logger, "info", "Ciclos activos encontrados: %d", len(ciclos_activos))
 

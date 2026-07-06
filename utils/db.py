@@ -158,7 +158,9 @@ def seeding(rutaGJSON: str) -> None:
                     fecha_fin        DATE,
                     rendimiento      REAL,
                     produccion_total REAL,
+                    estado_ciclo     TEXT,
                     PRIMARY KEY (id_ciclo),
+                    CHECK (estado_ciclo IN ('candidato', 'activo', 'finalizado'))
                     FOREIGN KEY (id_parcela) REFERENCES parcelas_vigentes(id_parcela)
                     UNIQUE (id_parcela, fecha_inicio, fecha_fin)
                 );
