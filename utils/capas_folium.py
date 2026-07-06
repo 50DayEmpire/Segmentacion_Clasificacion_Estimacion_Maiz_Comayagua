@@ -24,6 +24,7 @@ def agregar_capa_poligonos(
     mapa_colores: dict[str, str] | None = None,
     columnas_popup: list[str] | None = None,
     mostrar_tooltip: bool = True,
+    resaltar_hover: bool = True,
 ) -> folium.Map:
     """
     Agrega una capa de polígonos desde un GeoDataFrame a un mapa Folium.
@@ -90,11 +91,37 @@ def agregar_capa_poligonos(
             "opacity":     opacidad_borde,
         }
 
-    # ── Tooltip y popup via onEachFeature ─────────────────────────────────────
+    # ── Tooltip, popup y hover via onEachFeature ──────────────────────────────
     # Usamos on_each_feather para que streamlit-folium pueda capturar
     # last_object_clicked con propiedades (no solo lat/lng).
     tooltip  = None
     on_each  = None
+
+    # Fragmento JS para resaltar bordes al hacer hover (solo si resaltar_hover)
+    hover_js = ""
+    if resaltar_hover:
+        hover_js = """
+            layer.on('mouseover', function(e) {
+                if (!layer.__origStyle) {
+                    layer.__origStyle = {
+                        weight: layer.options.weight,
+                        color: layer.options.color,
+                        opacity: layer.options.opacity
+                    };
+                }
+                layer.setStyle({
+                    weight: (layer.__origStyle.weight || 1.5) + 2,
+                    color: '#ffffff',
+                    opacity: 1.0
+                });
+                if (layer.bringToFront) layer.bringToFront();
+            });
+            layer.on('mouseout', function(e) {
+                if (layer.__origStyle) {
+                    layer.setStyle(layer.__origStyle);
+                }
+            });
+        """
 
     if cols_existentes and mostrar_tooltip:
         tooltip = folium.GeoJsonTooltip(
@@ -118,6 +145,13 @@ def agregar_capa_poligonos(
                     window.__GLOBAL_DATA__.last_object_clicked = feature.properties;
                 }});
             }});
+            {hover_js}
+        }}
+        """)
+    else:
+        on_each = folium.JsCode(f"""
+        function(feature, layer) {{
+            {hover_js}
         }}
         """)
 

@@ -8,6 +8,7 @@ Renderiza el mapa interactivo de parcelas con st_folium().
 import folium
 import streamlit as st
 from streamlit_folium import st_folium
+from folium.plugins import Fullscreen
 
 from config import (
     MAPA_CENTRO_LAT,
@@ -112,6 +113,7 @@ def render_mapa_parcelas(filtros: dict) -> dict | None:
             peso_borde=2.5,
             columnas_popup=["NOMBRE", "superf_ha", "Area_Km2"],
             mostrar_tooltip=False,
+            resaltar_hover=False,
         )
 
     # ── Capa 2: parcelas segmentadas ───────────────────────────────────────────
@@ -158,6 +160,9 @@ def render_mapa_parcelas(filtros: dict) -> dict | None:
 
     # ── LayerControl ───────────────────────────────────────────────────────────
     folium.LayerControl(position="topright", collapsed=False).add_to(mapa)
+
+    # ── Botón de pantalla completa ───────────────────────────────────────────────
+    Fullscreen(position="topleft", title="Pantalla completa", title_cancel="Salir de pantalla completa").add_to(mapa)
 
     # ── Barra de estado ────────────────────────────────────────────────────────
     modo_label = (

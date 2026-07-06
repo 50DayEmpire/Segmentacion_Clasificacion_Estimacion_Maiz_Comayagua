@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import numpy as np
 import pandas as pd
+from utils.conexionDB import get_connection_raw
 
 from utils.aplicar_whittaker import aplicar_whittaker_series
 
