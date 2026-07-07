@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from contextlib import closing
-from datetime import timedelta
+from datetime import date, timedelta
 
 import numpy as np
 import pandas as pd
@@ -249,6 +249,61 @@ def detectar_sos_por_parcela(
     columnas_orden = ["id_parcela", "sos_fecha", "sos_valor", "pos_fecha",
                     "pos_valor", "base_valor", "amplitud", "umbral"]
     return pd.DataFrame(filas)[columnas_orden]
+
+
+def _inferir_temporada(sos_fecha: pd.Timestamp | date) -> str:
+    """Determina 'primera' o 'postrera' según el mes del SOS."""
+    mes = sos_fecha.month if hasattr(sos_fecha, "month") else pd.Timestamp(sos_fecha).month
+    return "primera" if 4 <= mes <= 7 else "postrera"
+
+
+def crear_ciclo_historico(
+    id_parcela: int,
+    sos_fecha: pd.Timestamp | date,
+    lswi_max: float | None = None,
+) -> int:
+    """
+    Crea un registro histórico en ``produccion_acumulada_ciclo`` con
+    estado ``finalizado`` y las ventanas T1/T2/T3/EOS derivadas de SOS.
+
+    Parámetros
+    ----------
+    id_parcela : int
+        Identificador de la parcela.
+    sos_fecha : pd.Timestamp | date
+        Fecha de inicio de temporada detectada.
+    lswi_max : float, opcional
+        Valor máximo de LSWI para la parcela (puede calcularse después).
+
+    Retorna
+    -------
+    int
+        ``id_ciclo`` del nuevo registro insertado.
+    """
+    sos = pd.Timestamp(sos_fecha).normalize()
+    temporada = _inferir_temporada(sos)
+
+    t1 = sos + timedelta(days=DIAS_VENTANAS["T1"])
+    t2 = sos + timedelta(days=DIAS_VENTANAS["T2"])
+    t3 = sos + timedelta(days=DIAS_VENTANAS["T3"])
+    eos = sos + timedelta(days=DIAS_VENTANAS["eos"])
+
+    sql = """
+        INSERT INTO produccion_acumulada_ciclo
+            (id_parcela, temporada, lswi_max, sos, t1, t2, t3, eos, estado_ciclo)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'finalizado')
+    """
+    with closing(get_connection_raw()) as conn:
+        with conn:
+            cursor = conn.execute(sql, (
+                id_parcela,
+                temporada,
+                lswi_max,
+                str(sos.date()),
+                str(t1.date()), str(t2.date()), str(t3.date()),
+                str(eos.date()),
+            ))
+            return cursor.lastrowid
 
 
 def persistir_sos_y_ventanas(id_ciclo: int, sos_mediana: pd.Timestamp) -> None:

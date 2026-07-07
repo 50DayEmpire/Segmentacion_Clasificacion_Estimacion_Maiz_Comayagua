@@ -27,10 +27,16 @@ CICLOS = {
     "Postrera (agosto-marzo)": "postrera",
 }
 
+FECHA_SIEMBRA_CICLOS = {
+    "primera":  {"inicio": (4, 1), "fin": (7, 31)},  # abril 1 - julio 31
+    "postrera": {"inicio": (8, 1), "fin": (3, 31)},  # agosto 1 - marzo 31
+}
+
 DURACION_CICLO = 120 # días — duración típica de un ciclo de cultivo de maíz en Comayagua
 
 # ── Años disponibles para análisis histórico ────────────────────────────────────
 ANIOS_HISTORICO = [2020, 2021, 2022, 2023, 2024, 2025]
+ANIO_INICIAL_HISTORICO = 2020
 
 # ── Ventanas de predicción ─────────────────────────────────────────────────────
 VENTANAS = ["T1", "T2", "T3"]
