@@ -144,6 +144,15 @@ def seeding(rutaGJSON: str) -> None:
                 );
             """)
             conn.execute("""
+                CREATE TABLE IF NOT EXISTS lswi_maximo (
+                    id_parcela        INTEGER NOT NULL,
+                    lswi_max          REAL,
+                    temporada         TEXT,
+                    PRIMARY KEY (id_parcela, temporada),
+                    FOREIGN KEY (id_parcela) REFERENCES parcelas_vigentes(id_parcela)
+                );
+            """)
+            conn.execute("""
                 CREATE TABLE IF NOT EXISTS produccion_acumulada_ciclo (
                     id_ciclo          INTEGER PRIMARY KEY AUTOINCREMENT,
                     id_parcela        INTEGER NOT NULL,

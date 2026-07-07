@@ -622,7 +622,8 @@ def _detectar_gaps(
     if fechas_en_bd.empty:
         return [(fecha_inicio, fecha_fin)]
 
-    fechas_faltantes = rango_completo.difference(fechas_en_bd.normalize())
+    fechas_en_bd_idx = fechas_en_bd.floor("D") if hasattr(fechas_en_bd, "floor") else pd.DatetimeIndex(fechas_en_bd)
+    fechas_faltantes = rango_completo.difference(fechas_en_bd_idx)
 
     if fechas_faltantes.empty:
         return []
@@ -681,7 +682,7 @@ def _fechas_consultadas_indices(
     with closing(get_connection_raw()) as conn:
         df = pd.read_sql(sql, conn, params=params, parse_dates=["fecha"])
 
-    return df["fecha"].dt.normalize() if not df.empty else pd.DatetimeIndex([])
+    return pd.DatetimeIndex(df["fecha"].dt.floor("D").unique()) if not df.empty else pd.DatetimeIndex([])
 
 
 def _fechas_consultadas_clima(
@@ -728,7 +729,7 @@ def _fechas_consultadas_clima(
     with closing(get_connection_raw()) as conn:
         df = pd.read_sql(sql, conn, params=params, parse_dates=["fecha"])
 
-    return df["fecha"].dt.normalize() if not df.empty else pd.DatetimeIndex([])
+    return pd.DatetimeIndex(df["fecha"].dt.floor("D").unique()) if not df.empty else pd.DatetimeIndex([])
 
 
 def obtener_indices(

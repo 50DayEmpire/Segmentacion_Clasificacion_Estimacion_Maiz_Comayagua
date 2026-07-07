@@ -31,7 +31,10 @@ from config import (
     OPENEOFED,
 )
 from pipeline.ingesta import obtener_indices, obtener_clima
+from contextlib import closing
+
 from utils.aplicar_whittaker import aplicar_whittaker_series
+from utils.conexionDB import get_connection_raw
 from pipeline.modulo_fenologico import segmentar_ciclos, detectar_sos, crear_ciclo_historico
 from pipeline.modulo_predictivo import construir_climatologia_diaria, guardar_climatologia_diaria
 
@@ -60,10 +63,137 @@ def _cargar_geojson_parcelas() -> dict:
 
 
 # =============================================================================
+# LSWI máximo histórico
+# =============================================================================
+
+def seed_lswi_max(
+    df_lswi_crudo: pd.DataFrame,
+    segmentos_por_parcela: dict[int, list[tuple[pd.Timestamp, pd.Timestamp]]],
+    lambda_param: float = 4000.0,
+) -> int:
+    """
+    Calcula el LSWI máximo por parcela a partir de los primeros 2 segmentos
+    (ciclos) detectados en la serie y persiste en ``lswi_maximo``:
+    el valor más alto de ambos como temporada ``primera`` y el otro como
+    ``postrera``.
+    Cada segmento se suaviza de forma independiente con Whittaker.
+
+    Parámetros
+    ----------
+    df_lswi_crudo : pd.DataFrame
+        DataFrame con índices crudos de LSWI (fechas de observación como
+        índice, columnas ``id_<parcela>``).
+    segmentos_por_parcela : dict[int, list[tuple[Timestamp, Timestamp]]]
+        Segmentos detectados por ``segmentar_ciclos``.
+    lambda_param : float
+        Parámetro de suavizado Whittaker (default 4000.0).
+
+    Retorna
+    -------
+    int
+        Número de filas insertadas en ``lswi_maximo``.
+    """
+    filas = []
+    for id_parcela, segmentos in segmentos_por_parcela.items():
+        col = f"id_{id_parcela}"
+        if col not in df_lswi_crudo.columns:
+            continue
+
+        primeros_2 = segmentos[:2]
+        if not primeros_2:
+            continue
+
+        maximos_por_segmento = []
+        for inicio, fin in primeros_2:
+            raw = df_lswi_crudo.loc[inicio:fin, col].dropna()
+            if raw.empty:
+                continue
+
+            raw = raw.where((raw >= -1.0) & (raw <= 1.0), np.nan).dropna()
+            if raw.empty:
+                continue
+
+            diario = raw.to_frame(col).reindex(
+                pd.date_range(inicio, fin, freq="D"),
+            )
+            suave = aplicar_whittaker_series(
+                {"LSWI": diario},
+                lambda_param=lambda_param,
+            )["LSWI"]
+            maximos_por_segmento.append(suave[col].max())
+
+        if len(maximos_por_segmento) < 1:
+            continue
+
+        maximos_por_segmento.sort(reverse=True)
+        primera = maximos_por_segmento[0]
+        postrera = maximos_por_segmento[1] if len(maximos_por_segmento) > 1 else None
+
+        filas.append((id_parcela, float(primera), "primera"))
+        if postrera is not None:
+            filas.append((id_parcela, float(postrera), "postrera"))
+
+    if not filas:
+        print("    [WARN]   No se pudieron calcular valores de LSWI máximo.")
+        return 0
+
+    sql = """
+        INSERT INTO lswi_maximo (id_parcela, lswi_max, temporada)
+        VALUES (?, ?, ?)
+        ON CONFLICT (id_parcela, temporada) DO UPDATE SET
+            lswi_max = excluded.lswi_max
+    """
+    with closing(get_connection_raw()) as conn:
+        with conn:
+            conn.executemany(sql, filas)
+
+    print(f"    → LSWI máximo persistido para {len(filas)} parcela(s)-temporada(s).")
+    return len(filas)
+
+
+# =============================================================================
+# Consulta de LSWI máximo del último ciclo por temporada
+# =============================================================================
+
+def obtener_lswi_max_ultimo_ciclo(
+    id_parcela: int,
+    temporada: str,
+) -> float | None:
+    """
+    Obtiene el ``lswi_max`` del ciclo más reciente en
+    ``produccion_acumulada_ciclo`` para la parcela y temporada dadas.
+
+    Parámetros
+    ----------
+    id_parcela : int
+        Identificador de la parcela.
+    temporada : str
+        ``"primera"`` o ``"postrera"``.
+
+    Retorna
+    -------
+    float | None
+        El valor de ``lswi_max`` o ``None`` si no hay ciclos registrados.
+    """
+    sql = """
+        SELECT lswi_max
+        FROM produccion_acumulada_ciclo
+        WHERE id_parcela = ? AND temporada = ?
+        ORDER BY id_ciclo DESC
+        LIMIT 1
+    """
+    with closing(get_connection_raw()) as conn:
+        df = pd.read_sql(sql, conn, params=(id_parcela, temporada))
+    if df.empty or df.iloc[0]["lswi_max"] is None:
+        return None
+    return float(df.iloc[0]["lswi_max"])
+
+
+# =============================================================================
 # Función principal
 # =============================================================================
 
-def seed_series(
+def seed_series_historicas(
     fecha_fin: str | None = None,
     lambda_param: float = 4000.0,
     distancia_min_dias: int = 90,
@@ -112,21 +242,21 @@ def seed_series(
 
     fecha_inicio = f"{ANIO_INICIAL_HISTORICO}-01-01"
 
-    print(f"📅 Rango histórico: [{fecha_inicio} → {fecha_fin}]")
-    print(f"🔌 Conectando a openEO CDSE y federado...")
+    print(f"[CAL]  Rango histórico: [{fecha_inicio} → {fecha_fin}]", flush=True)
+    print(f"[CON]  Conectando a openEO CDSE y federado...", flush=True)
 
     # ── 1. Conexiones openEO ───────────────────────────────────────────────
     conn_cdse = _conectar_cdse()
     conn_fed = _conectar_fed()
 
     # ── 2. GeoJSON de parcelas ─────────────────────────────────────────────
-    print(f"🗺️  Cargando GeoJSON de parcelas desde {GPKG_PATH}...")
+    print(f"[MAP]   Cargando GeoJSON de parcelas desde {GPKG_PATH}...")
     geojson = _cargar_geojson_parcelas()
     n_parcelas = len(geojson.get("features", []))
     print(f"    → {n_parcelas} parcela(s) cargada(s).")
 
     # ── 3. Ingesta de índices Sentinel-2 ───────────────────────────────────
-    print(f"\n🛰️  Ingestando índices EVI/LSWI desde {fecha_inicio}...")
+    print(f"\n[SAT]   Ingestando índices EVI/LSWI desde {fecha_inicio}...")
     dfs_indices = obtener_indices(
         connection=conn_cdse,
         geojson_openeo=geojson,
@@ -139,7 +269,7 @@ def seed_series(
           f"{dfs_indices['LSWI'].shape[1]} parcelas")
 
     # ── 4. Ingesta de datos climáticos ─────────────────────────────────────
-    print(f"\n🌡️  Ingestando datos climáticos (AgERA5) desde {fecha_inicio}...")
+    print(f"\n[TEMP]   Ingestando datos climáticos (AgERA5) desde {fecha_inicio}...")
     dfs_clima = obtener_clima(
         connection=conn_fed,
         geojson_openeo=geojson,
@@ -151,7 +281,7 @@ def seed_series(
     print(f"    → Radiación: {dfs_clima['solar-radiation-flux'].shape[0]} fechas")
 
     # ── 5. Climatología ──────────────────────────────────────────────────
-    print(f"\n📊 Calculando y persistiendo climatología (PAR + temperatura)...")
+    print(f"\n[CHART]  Calculando y persistiendo climatología (PAR + temperatura)...")
 
     df_temp = dfs_clima["temperature-mean"]
     df_ssrd = dfs_clima["solar-radiation-flux"]
@@ -169,7 +299,7 @@ def seed_series(
     print(f"    → Climatología persistida (años {anio_min}-{anio_max}).")
 
     # ── 6. Suavizado Whittaker directo sobre EVI ──────────────────────────
-    print(f"\n⚙️  Suavizando EVI con Whittaker-Eilers...")
+    print(f"\n[GEAR]   Suavizando EVI con Whittaker-Eilers...")
     df_evi = dfs_indices["EVI"].copy()
 
     df_evi = df_evi.mask((df_evi < -1.0) | (df_evi > 1.0), np.nan)
@@ -189,8 +319,9 @@ def seed_series(
     print(f"    → EVI suavizado: {df_evi.shape[0]} días, "
           f"{df_evi.shape[1]} parcelas")
     print(f"Suavizado con lambda={lambda_param}")
-    # ── 7. Segmentación de ciclos por parcela ─────────────────────────────
-    print(f"\n🌱 Segmentando ciclos fenológicos por parcela...")
+
+    # ── 8. Segmentación de ciclos por parcela ─────────────────────────────
+    print(f"\n[SEED]  Segmentando ciclos fenológicos por parcela...")
     segmentos_por_parcela: dict[int, list[tuple[pd.Timestamp, pd.Timestamp]]] = {}
 
     for col in df_evi.columns:
@@ -215,8 +346,16 @@ def seed_series(
     print(f"    → {n_con_segmentos} parcela(s) con segmentos detectados "
           f"({total_segmentos} ciclos en total).")
 
-    # ── 8. Detección de SOS por segmento y persistencia ────────────────────
-    print(f"\n🌱 Detectando SOS en cada segmento...")
+    # ── 9. LSWI máximo histórico ──────────────────────────────────────────
+    print(f"\n[WAVE]  Calculando LSWI máximo desde los primeros 2 segmentos...")
+    seed_lswi_max(
+        dfs_indices["LSWI"],
+        segmentos_por_parcela,
+        lambda_param=lambda_param,
+    )
+
+    # ── 10. Detección de SOS por segmento y persistencia ───────────────────
+    print(f"\n[SEED]  Detectando SOS en cada segmento...")
     sos_por_segmento: dict[int, list[dict]] = {}
     sos_detectados = 0
     ciclos_creados = 0
