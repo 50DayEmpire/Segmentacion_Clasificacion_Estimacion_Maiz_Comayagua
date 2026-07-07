@@ -732,6 +732,99 @@ def _fechas_consultadas_clima(
     return pd.DatetimeIndex(df["fecha"].dt.floor("D").unique()) if not df.empty else pd.DatetimeIndex([])
 
 
+# =============================================================================
+# Orquestador de ingesta por lotes anuales
+# =============================================================================
+
+def _partir_en_anios(fecha_inicio: str, fecha_fin: str) -> list[tuple[str, str]]:
+    """
+    Divide el rango [fecha_inicio, fecha_fin] en lotes por año calendario.
+    """
+    inicio = pd.Timestamp(fecha_inicio)
+    fin = pd.Timestamp(fecha_fin)
+    lotes: list[tuple[str, str]] = []
+    for anio in range(inicio.year, fin.year + 1):
+        l_ini = max(inicio, pd.Timestamp(f"{anio}-01-01"))
+        l_fin = min(fin, pd.Timestamp(f"{anio}-12-31"))
+        if l_ini <= l_fin:
+            lotes.append((str(l_ini.date()), str(l_fin.date())))
+    return lotes
+
+
+def _fusionar_dfs_anuales(
+    acumulado: dict[str, pd.DataFrame] | None,
+    lote: dict[str, pd.DataFrame],
+) -> dict[str, pd.DataFrame]:
+    """Concatena DataFrames anuales (mismo índice DatetimeIndex, columnas id_<N>)."""
+    if acumulado is None:
+        return {k: v.copy() for k, v in lote.items()}
+    fusion = {}
+    for key in lote:
+        fusion[key] = pd.concat([acumulado.get(key, pd.DataFrame()), lote[key]])
+        fusion[key] = fusion[key].sort_index()
+        fusion[key] = fusion[key][~fusion[key].index.duplicated(keep="last")]
+    return fusion
+
+
+def obtener_indices_por_lotes(
+    connection: openeo.Connection,
+    geojson_openeo: dict,
+    fecha_inicio: str,
+    fecha_fin: str,
+    config_cloud_mask: dict | None = None,
+) -> dict[str, pd.DataFrame]:
+    """
+    Obtiene índices EVI/LSWI dividiendo el rango multianual en lotes
+    anuales para evitar jobs openEO demasiado grandes.
+
+    Internamente delega a ``obtener_indices`` por cada año, preservando
+    la lógica de caché en BD (solo descarga gaps).
+    """
+    lotes = _partir_en_anios(fecha_inicio, fecha_fin)
+    print(f"  Índices: {len(lotes)} lote(s) anual(es) [{fecha_inicio} → {fecha_fin}]")
+    acumulado: dict[str, pd.DataFrame] | None = None
+    for l_ini, l_fin in lotes:
+        print(f"\n  ── Lote {l_ini[:4]}: [{l_ini} → {l_fin}]")
+        dfs_lote = obtener_indices(
+            connection=connection,
+            geojson_openeo=geojson_openeo,
+            fecha_inicio=l_ini,
+            fecha_fin=l_fin,
+            config_cloud_mask=config_cloud_mask,
+        )
+        acumulado = _fusionar_dfs_anuales(acumulado, dfs_lote)
+    return acumulado
+
+
+def obtener_clima_por_lotes(
+    connection: openeo.Connection,
+    geojson_openeo: dict,
+    fecha_inicio: str,
+    fecha_fin: str,
+    num_parc: int | None = None,
+) -> dict[str, pd.DataFrame]:
+    """
+    Obtiene datos climáticos AgERA5 dividiendo el rango multianual en
+    lotes anuales.
+
+    Internamente delega a ``obtener_clima`` por cada año.
+    """
+    lotes = _partir_en_anios(fecha_inicio, fecha_fin)
+    print(f"  Clima: {len(lotes)} lote(s) anual(es) [{fecha_inicio} → {fecha_fin}]")
+    acumulado: dict[str, pd.DataFrame] | None = None
+    for l_ini, l_fin in lotes:
+        print(f"\n  ── Lote {l_ini[:4]}: [{l_ini} → {l_fin}]")
+        dfs_lote = obtener_clima(
+            connection=connection,
+            geojson_openeo=geojson_openeo,
+            fecha_inicio=l_ini,
+            fecha_fin=l_fin,
+            num_parc=num_parc,
+        )
+        acumulado = _fusionar_dfs_anuales(acumulado, dfs_lote)
+    return acumulado
+
+
 def obtener_indices(
     connection: openeo.Connection,
     geojson_openeo: dict,

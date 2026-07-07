@@ -270,7 +270,7 @@ def construir_climatologia_diaria(serie_historica_agera5: pd.Series, ventana_sua
     # Promedio móvil circular (envuelve dic-enero) para suavizar
     extendida = pd.concat([climatologia_cruda, climatologia_cruda, climatologia_cruda])
     suavizada = extendida.rolling(ventana_suavizado, center=True, min_periods=1).mean()
-    return suavizada.iloc[366:732].reset_index(drop=True)
+    return suavizada.iloc[366:732].set_axis(range(1, 367))
 
 def construir_serie_climatica_prediccion(
     fecha_inicio_ventana: pd.Timestamp,

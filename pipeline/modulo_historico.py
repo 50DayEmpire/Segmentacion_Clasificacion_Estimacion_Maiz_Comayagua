@@ -30,7 +30,7 @@ from config import (
     OPENEO,
     OPENEOFED,
 )
-from pipeline.ingesta import obtener_indices, obtener_clima
+from pipeline.ingesta import obtener_indices_por_lotes, obtener_clima_por_lotes
 from contextlib import closing
 
 from utils.aplicar_whittaker import aplicar_whittaker_series
@@ -255,9 +255,9 @@ def seed_series_historicas(
     n_parcelas = len(geojson.get("features", []))
     print(f"    → {n_parcelas} parcela(s) cargada(s).")
 
-    # ── 3. Ingesta de índices Sentinel-2 ───────────────────────────────────
+    # ── 3. Ingesta de índices Sentinel-2 (por lotes anuales) ──────────────
     print(f"\n[SAT]   Ingestando índices EVI/LSWI desde {fecha_inicio}...")
-    dfs_indices = obtener_indices(
+    dfs_indices = obtener_indices_por_lotes(
         connection=conn_cdse,
         geojson_openeo=geojson,
         fecha_inicio=fecha_inicio,
@@ -268,9 +268,9 @@ def seed_series_historicas(
     print(f"    → LSWI: {dfs_indices['LSWI'].shape[0]} fechas, "
           f"{dfs_indices['LSWI'].shape[1]} parcelas")
 
-    # ── 4. Ingesta de datos climáticos ─────────────────────────────────────
-    print(f"\n[TEMP]   Ingestando datos climáticos (AgERA5) desde {fecha_inicio}...")
-    dfs_clima = obtener_clima(
+    # ── 4. Ingesta de datos climáticos (por lotes anuales) ────────────────
+    print(f"\n[TEMP]  Ingestando datos climáticos (AgERA5) desde {fecha_inicio}...")
+    dfs_clima = obtener_clima_por_lotes(
         connection=conn_fed,
         geojson_openeo=geojson,
         fecha_inicio=fecha_inicio,
@@ -359,6 +359,7 @@ def seed_series_historicas(
     sos_por_segmento: dict[int, list[dict]] = {}
     sos_detectados = 0
     ciclos_creados = 0
+    ciclos_creados_info: list[dict] = []
 
     for id_parcela, segmentos in segmentos_por_parcela.items():
         col = f"id_{id_parcela}"
@@ -384,11 +385,16 @@ def seed_series_historicas(
             sos_fecha = resultado.get("sos_fecha")
             if sos_fecha is not None:
                 sos_detectados += 1
-                crear_ciclo_historico(
+                id_ciclo = crear_ciclo_historico(
                     id_parcela=id_parcela,
                     sos_fecha=sos_fecha,
                 )
                 ciclos_creados += 1
+                ciclos_creados_info.append({
+                    "id_ciclo": id_ciclo,
+                    "id_parcela": id_parcela,
+                    "sos_fecha": sos_fecha,
+                })
 
         if lista_resultados:
             sos_por_segmento[id_parcela] = lista_resultados
@@ -396,6 +402,32 @@ def seed_series_historicas(
     print(f"    → SOS detectado en {sos_detectados}/{total_segmentos} segmentos "
           f"({len(sos_por_segmento)} parcelas).")
     print(f"    → {ciclos_creados} ciclo(s) histórico(s) creado(s) en BD.")
+
+    # ── 11. Predicciones por ventana para cada ciclo histórico ─────────────
+    if ciclos_creados_info:
+        from datetime import date as _date
+        from config import VENTANAS, DIAS_VENTANAS as _DV
+        from pipeline.flujos_trabajo import ejecutar_prediccion_ventana
+
+        hoy = _date.today()
+        print(f"\n[PRED] Generando predicciones para {len(ciclos_creados_info)} ciclo(s)...")
+        predicciones_ok = 0
+        for cinfo in ciclos_creados_info:
+            for ventana in VENTANAS:
+                fecha_ventana = cinfo["sos_fecha"] + pd.Timedelta(days=_DV[ventana])
+                if fecha_ventana.date() > hoy:
+                    continue
+                res = ejecutar_prediccion_ventana(
+                    id_ciclo=cinfo["id_ciclo"],
+                    ventana=ventana,
+                    fecha_hoy=hoy,
+                    lambda_param=lambda_param,
+                )
+                if res is not None:
+                    predicciones_ok += 1
+        print(f"    → {predicciones_ok} prediccion(es) generada(s) exitosamente.")
+    else:
+        print(f"\n[PRED] Sin ciclos creados, se omite generación de predicciones.")
 
     # ── Resultado ──────────────────────────────────────────────────────────
     return {

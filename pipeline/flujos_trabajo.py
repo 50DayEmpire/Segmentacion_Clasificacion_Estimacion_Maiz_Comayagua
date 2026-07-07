@@ -2,10 +2,10 @@
 """
 Motor de predicción de rendimiento de maíz para el Valle de Comayagua.
 
-Define tres flujos de trabajo que conectan, en orden, todas las funciones
-reutilizables del pipeline: ingesta con caché, preprocesamiento VPM,
-detección fenológica de inicio de temporada (SOS), cálculo de GPP y
-estimación de rendimiento final.
+Define cuatro flujos de trabajo que conectan, en orden, todas las
+funciones reutilizables del pipeline: ingesta con caché,
+preprocesamiento VPM, detección fenológica de inicio de temporada (SOS),
+cálculo de GPP y estimación de rendimiento final.
 
 Flujos disponibles
 ------------------
@@ -23,6 +23,12 @@ Flujos disponibles
    Núcleo de procesamiento puro: recibe los DataFrames ya en memoria y
    ejecuta preprocesamiento → GPP → fenología → rendimiento.  Útil en
    notebooks o cuando la ingesta se hizo en otro paso.
+
+4. ``ejecutar_prediccion_ventana``
+   Orquesta la predicción para una ventana T1/T2/T3 de un ciclo
+   histórico.  Carga índices crudos desde BD, preprocesa, persiste
+   índices suavizados y delega la extensión sintética + VPM a
+   ``modulo_predictivo.ejecutar_prediccion_ventana``.
 
 Uso típico
 ----------
@@ -53,6 +59,8 @@ Uso típico
 """
 from __future__ import annotations
 
+from datetime import date
+
 import openeo
 import pandas as pd
 
@@ -68,6 +76,12 @@ from pipeline.modulo_vpm import (
     calcular_biomasa_y_rendimiento,
 )
 from pipeline.modulo_fenologico import detectar_sos
+from pipeline.modulo_vpm import guardar_indices_suavizados
+from pipeline.modulo_predictivo import (
+    ejecutar_prediccion_ventana as _ejecutar_prediccion_ventana_core,
+    existe_prediccion_ventana,
+)
+from config import DIAS_VENTANAS
 
 # ── Defaults del modelo VPM ───────────────────────────────────────────────────
 _VPM_DEFAULTS: dict = {
@@ -576,6 +590,173 @@ def calcular_rendimiento_desde_indices(
         "fenologia":   resultado["fenologia"],
         "rendimiento": resultado["rendimiento"],
     }
+
+
+# =============================================================================
+# FLUJO 4 — Predicción por ventana para un ciclo (id_ciclo + T1/T2/T3)
+# =============================================================================
+from contextlib import closing
+from utils.conexionDB import get_connection_raw
+def _cargar_ciclo(id_ciclo: int) -> dict | None:
+    sql = """
+        SELECT id_ciclo, id_parcela, temporada, lswi_max,
+               sos, t1, t2, t3, eos, estado_ciclo
+        FROM produccion_acumulada_ciclo
+        WHERE id_ciclo = ?
+    """
+    with closing(get_connection_raw()) as conn:
+        row = conn.execute(sql, (id_ciclo,)).fetchone()
+    if row is None:
+        return None
+    cols = [
+        "id_ciclo", "id_parcela", "temporada", "lswi_max",
+        "sos", "t1", "t2", "t3", "eos", "estado_ciclo",
+    ]
+    return dict(zip(cols, row))
+
+
+def _obtener_lswi_max_historico(id_parcela: int, temporada: str) -> float | None:
+    sql = """
+        SELECT lswi_max FROM lswi_maximo
+        WHERE id_parcela = ? AND temporada = ?
+    """
+    with closing(get_connection_raw()) as conn:
+        row = conn.execute(sql, (id_parcela, temporada)).fetchone()
+    return float(row[0]) if row else None
+
+
+def ejecutar_prediccion_ventana(
+    id_ciclo: int,
+    ventana: str,
+    fecha_hoy: date | None = None,
+    lambda_param: float = 4000.0,
+) -> dict | None:
+    """
+    Orquesta la predicción de rendimiento para una ventana T1/T2/T3
+    de un ciclo almacenado en ``produccion_acumulada_ciclo``.
+
+    Flujo
+    -----
+    1. Carga el ciclo desde BD.
+    2. Calcula ``fecha_ventana`` = SOS + ``DIAS_VENTANAS[ventana]``.
+    3. Carga índices crudos EVI/LSWI desde ``series_diarias_vpm``
+       entre SOS y ``fecha_ventana``.
+    4. Preprocesa (reindexado diario, Whittaker, FPAR, W_scalar).
+    5. Persiste índices suavizados en ``indices_suavizados``.
+    6. Delega a ``modulo_predictivo.ejecutar_prediccion_ventana``
+       la extensión sintética, el cálculo VPM (GPP/NPP/rendimiento)
+       y la persistencia en ``predicciones_ventana`` +
+       ``series_extrapoladas_ventana``.
+
+    Parámetros
+    ----------
+    id_ciclo : int
+        Identificador del ciclo en ``produccion_acumulada_ciclo``.
+    ventana : str
+        ``"T1"``, ``"T2"`` o ``"T3"``.
+    fecha_hoy : date | None
+        Fecha de corte para los datos reales. Por defecto: hoy.
+    lambda_param : float
+        Parámetro de suavizado Whittaker (por defecto 4000.0).
+
+    Retorna
+    -------
+    dict | None
+        Resultado del motor interno o ``None`` si el ciclo no existe,
+        falta SOS, la ventana es inválida, la fecha_ventana es futura,
+        o la predicción ya había sido congelada antes.
+    """
+    # ── 1. Cargar ciclo ──────────────────────────────────────────────────
+    ciclo = _cargar_ciclo(id_ciclo)
+    if ciclo is None:
+        print(f"  [SKIP] Ciclo {id_ciclo} no encontrado en BD.")
+        return None
+
+    id_parcela = ciclo["id_parcela"]
+    sos_str = ciclo.get("sos")
+    if not sos_str:
+        print(f"  [SKIP] Ciclo {id_ciclo} (parcela {id_parcela}) sin SOS.")
+        return None
+
+    sos_ts = pd.Timestamp(sos_str)
+    dias_ventana = DIAS_VENTANAS.get(ventana)
+    if dias_ventana is None:
+        print(f"  [ERROR] Ventana '{ventana}' no v\u00e1lida (use T1/T2/T3).")
+        return None
+
+    fecha_ventana = sos_ts + pd.Timedelta(days=dias_ventana)
+    if fecha_hoy is None:
+        fecha_hoy = date.today()
+    fecha_hoy_ts = pd.Timestamp(fecha_hoy)
+
+    print(f"\n[WFLOW] Predicci\u00f3n ciclo {id_ciclo} | parcela {id_parcela} | "
+          f"{ventana} (SOS+{dias_ventana}d = {fecha_ventana.date()})")
+
+    if fecha_ventana > fecha_hoy_ts:
+        print(f"  [SKIP] fecha_ventana ({fecha_ventana.date()}) > fecha_hoy ({fecha_hoy}).")
+        return None
+
+    # ── 2. Verificar si ya existe ─────────────────────────────────────────
+    if existe_prediccion_ventana(id_ciclo, ventana):
+        print(f"  [SKIP] Predicci\u00f3n ya existe para ciclo {id_ciclo}, ventana {ventana}.")
+        return None
+
+    # ── 3. Cargar índices crudos desde BD ─────────────────────────────────
+    print(f"  [1/5] Cargando EVI/LSWI crudos desde SOS...")
+    fecha_fin_lectura = min(fecha_ventana, fecha_hoy_ts)
+    try:
+        dfs_crudos = cargar_indices_desde_bd(
+            fecha_inicio=str(sos_ts.date()),
+            fecha_fin=str(fecha_fin_lectura.date()),
+            ids_parcelas=[id_parcela],
+        )
+    except ValueError as e:
+        print(f"  [ERROR] {e}")
+        return None
+
+    # ── 4. Preprocesar (Whittaker, FPAR, W_scalar) ────────────────────────
+    print(f"  [2/5] Preprocesando \u00edndices (Whittaker \u03bb={lambda_param})...")
+    dfs_vpm = preprocesar_indices_vpm(
+        dfs_vpm_crudos=dfs_crudos,
+        lambda_param=lambda_param,
+    )
+
+    # ── 5. Persistir índices suavizados ────────────────────────────────────
+    print(f"  [3/5] Persistiendo \u00edndices suavizados en `indices_suavizados`...")
+    n_suav = guardar_indices_suavizados(id_ciclo, id_parcela, dfs_vpm)
+    print(f"        {n_suav} fila(s) escritas.")
+
+    # ── 6. Preparar datos para el motor de predicción ─────────────────────
+    print(f"  [4/5] Armando datos para motor VPM...")
+    ciclo_ext = dict(ciclo)
+    ciclo_ext["fecha_inicio"] = str(sos_ts.date())
+
+    if ciclo_ext.get("lswi_max") is None:
+        lswi_max_hist = _obtener_lswi_max_historico(id_parcela, ciclo["temporada"])
+        if lswi_max_hist is not None:
+            ciclo_ext["lswi_max"] = lswi_max_hist
+            print(f"        Usando lswi_max={lswi_max_hist:.3f} de `lswi_maximo` "
+                  f"({ciclo['temporada']})")
+
+    dfs_vpm_por_parcela = {id_parcela: dfs_vpm}
+
+    # ── 7. Ejecutar predicción (extensión + GPP + NPP + rendimiento) ──────
+    print(f"  [5/5] Ejecutando cadena VPM (GPP \u2192 NPP \u2192 rendimiento)...")
+    resultado = _ejecutar_prediccion_ventana_core(
+        ciclo=ciclo_ext,
+        ventana=ventana,
+        fecha_ventana=fecha_ventana.date(),
+        dfs_vpm_por_parcela=dfs_vpm_por_parcela,
+        fecha_hoy=fecha_hoy,
+    )
+
+    if resultado is None:
+        print(f"  [ERROR] Predicci\u00f3n fall\u00f3 para ciclo {id_ciclo}, ventana {ventana}.")
+    else:
+        print(f"  [OK] Predicci\u00f3n completada: "
+              f"{resultado.get('yield_qq_ha', 'N/A'):.1f} qq/ha")
+
+    return resultado
 
 
 # =============================================================================

@@ -1451,6 +1451,52 @@ def _accion_worker_ver_log() -> None:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# SECCIÓN 8 — Procesamiento histórico
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _menu_historico() -> None:
+    while True:
+        _seccion("8 · Procesamiento Histórico")
+        key = _menu({
+            "seed_series": "Ejecutar seed de series históricas (índices + clima + ciclos + predicciones)",
+        })
+        if key == "0":
+            return
+        elif key == "seed_series":
+            _accion_seed_series_historicas()
+
+
+def _accion_seed_series_historicas() -> None:
+    _seccion("Seed de series históricas")
+    _warn("Este proceso descarga índices EVI/LSWI y clima AgERA5 desde "
+          "ANIO_INICIAL_HISTORICO hasta hoy, calcula climatología, "
+          "segmenta ciclos, detecta SOS, persiste ciclos y ejecuta "
+          "predicciones para todas las ventanas ya transcurridas. "
+          "Esto puede tardar varias horas y requiere conexión a openEO.")
+    print()
+    confirmar = _pedir("¿Continuar? (s/n)", "n")
+    if confirmar.lower() != "s":
+        _info("Cancelado.")
+        return
+
+    from pipeline.modulo_historico import seed_series_historicas
+    try:
+        resultado = seed_series_historicas()
+    except Exception as exc:
+        _error(f"Error durante el seed histórico: {exc}")
+        _pausar()
+        return
+
+    _ok("Seed histórico completado.")
+    print()
+    n_segmentos = sum(len(v) for v in resultado.get("segmentos_por_parcela", {}).values())
+    n_sos = len(resultado.get("sos_por_segmento", {}))
+    print(f"  Segmentos detectados  : {n_segmentos}")
+    print(f"  Parcelas con SOS      : {n_sos}")
+    _pausar()
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # MENÚ PRINCIPAL
 # ══════════════════════════════════════════════════════════════════════════════
 
@@ -1462,6 +1508,7 @@ _MENU_PRINCIPAL = {
     "bd":          "Inspección de la base de datos SQLite",
     "diagnostico": "Diagnóstico del proyecto",
     "worker":      "Worker Diario (automatización)",
+    "historico":   "Procesamiento histórico de series multianuales",
 }
 
 def main() -> None:
@@ -1490,6 +1537,8 @@ def main() -> None:
             _menu_diagnostico()
         elif key == "worker":
             _menu_worker()
+        elif key == "historico":
+            _menu_historico()
 
 
 if __name__ == "__main__":
