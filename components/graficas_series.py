@@ -1,4 +1,5 @@
 # components/graficas_series.py — Curvas EVI, LSWI y GPP por parcela
+import pandas as pd
 import streamlit as st
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
@@ -46,6 +47,9 @@ def _figura_series(
     titulo: str,
     datos: dict,
     indices: list[str],
+    ventana_fecha: pd.Timestamp | None = None,
+    ventana_nombre: str | None = None,
+    extrapolado: dict | None = None,
 ) -> go.Figure:
     fig = make_subplots(
         rows=len(indices), cols=1,
@@ -87,6 +91,31 @@ def _figura_series(
                 xref="paper", yref=f"y{i}" if i > 1 else "y",
                 x=0.5, y=0, showarrow=False,
                 font=dict(color="#4a5568", size=13),
+                row=i, col=1,
+            )
+
+        if extrapolado is not None:
+            ext = extrapolado.get(indice)
+            if ext is not None and not ext.empty:
+                fig.add_trace(
+                    go.Scatter(
+                        x=ext.index, y=ext.values,
+                        mode="lines",
+                        name=f"{indice} proyectado",
+                        line=dict(color=color, width=2.5, dash="dash"),
+                        showlegend=True,
+                    ),
+                    row=i, col=1,
+                )
+
+        if ventana_fecha is not None:
+            etiqueta = f"{ventana_nombre} {ventana_fecha.strftime('%d/%m/%Y')}" if ventana_nombre else ventana_fecha.strftime('%d/%m/%Y')
+            fig.add_vline(
+                x=ventana_fecha,
+                line=dict(color="#e74c3c", width=1.5, dash="dash"),
+                annotation_text=etiqueta,
+                annotation_position="top right",
+                annotation_font=dict(color="#e74c3c", size=10),
                 row=i, col=1,
             )
 

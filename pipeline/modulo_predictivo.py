@@ -451,7 +451,14 @@ def ejecutar_prediccion_ventana(
         )
 
     sos_ts = pd.Timestamp(sos_str)
-    eos_ts = sos_ts + timedelta(days=DURACION_CICLO)
+
+    if ventana == "EOS":
+        eos_str = ciclo.get("eos")
+        if not eos_str:
+            return None
+        eos_ts = pd.Timestamp(eos_str)
+    else:
+        eos_ts = sos_ts + timedelta(days=DURACION_CICLO)
 
     clim_par  = obtener_climatologia("PAR")
     clim_temp = obtener_climatologia("temperatura")
@@ -471,8 +478,12 @@ def ejecutar_prediccion_ventana(
         if col in dfs_vpm["LSWI"].columns else pd.Series(dtype=float)
     )
 
-    serie_evi_ext,  _ = extender_serie_con_curva_parametrica(serie_evi_obs,  sos_ts, eos_ts)
-    serie_lswi_ext, _ = extender_serie_con_curva_parametrica(serie_lswi_obs, sos_ts, eos_ts)
+    if ventana == "EOS":
+        serie_evi_ext  = serie_evi_obs
+        serie_lswi_ext = serie_lswi_obs
+    else:
+        serie_evi_ext,  _ = extender_serie_con_curva_parametrica(serie_evi_obs,  sos_ts, eos_ts)
+        serie_lswi_ext, _ = extender_serie_con_curva_parametrica(serie_lswi_obs, sos_ts, eos_ts)
 
     df_evi_ext  = pd.DataFrame({col: serie_evi_ext})
     df_lswi_ext = pd.DataFrame({col: serie_lswi_ext})
@@ -569,6 +580,7 @@ def ejecutar_prediccion_ventana(
         "id_ciclo": id_ciclo,
         "ventana": ventana,
         "yield_qq_ha": yield_qq_ha,
+        "yield_qq_parcela": yield_qq_parcela,
         "fecha_congelamiento": datetime.utcnow().isoformat(),
         "parcelas_ok": 1 if id_prediccion is not None else 0,
     }

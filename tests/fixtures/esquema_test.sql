@@ -53,7 +53,7 @@ CREATE TABLE IF NOT EXISTS predicciones_ventana (
     rendimiento_estimado_qq_parcela  REAL,
     fecha_congelamiento        TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     UNIQUE (id_ciclo, ventana),
-    CHECK (ventana IN ('T1', 'T2', 'T3')),
+    CHECK (ventana IN ('T1', 'T2', 'T3', 'EOS')),
     FOREIGN KEY (id_ciclo) REFERENCES produccion_acumulada_ciclo(id_ciclo),
     FOREIGN KEY (id_parcela) REFERENCES parcelas_vigentes(id_parcela)
 );

@@ -182,7 +182,7 @@ def cargar_predicciones_ciclo(id_ciclo: int) -> pd.DataFrame:
     from utils.conexionDB import get_connection_raw
 
     sql = """
-        SELECT ventana, fecha_ventana,
+        SELECT id_prediccion, ventana, fecha_ventana,
                gpp_acumulado, npp_acumulado,
                rendimiento_estimado_qq_ha, rendimiento_estimado_qq_parcela
         FROM predicciones_ventana
@@ -191,6 +191,76 @@ def cargar_predicciones_ciclo(id_ciclo: int) -> pd.DataFrame:
     """
     with closing(get_connection_raw()) as conn:
         return pd.read_sql(sql, conn, params=(id_ciclo,), parse_dates=["fecha_ventana"])
+
+
+@st.cache_data(show_spinner="Cargando índices suavizados…")
+def cargar_indices_suavizados(id_ciclo: int) -> pd.DataFrame | None:
+    from contextlib import closing
+    from utils.conexionDB import get_connection_raw
+
+    sql = """
+        SELECT fecha, evi, lswi
+        FROM indices_suavizados
+        WHERE id_ciclo = ?
+        ORDER BY fecha
+    """
+    with closing(get_connection_raw()) as conn:
+        df = pd.read_sql(sql, conn, params=(id_ciclo,), parse_dates=["fecha"])
+    return df if not df.empty else None
+
+
+@st.cache_data(show_spinner="Cargando índices crudos…")
+def cargar_indices_crudos(id_parcela: int, fecha_inicio, fecha_fin) -> pd.DataFrame | None:
+    from contextlib import closing
+    from utils.conexionDB import get_connection_raw
+
+    sql = """
+        SELECT fecha, evi_crudo AS evi, lswi_crudo AS lswi
+        FROM series_diarias_vpm
+        WHERE id_parcela = ? AND fecha >= ? AND fecha <= ?
+        ORDER BY fecha
+    """
+    fecha_ini = fecha_inicio.strftime("%Y-%m-%d") if hasattr(fecha_inicio, "strftime") else str(fecha_inicio)
+    fecha_fnl = fecha_fin.strftime("%Y-%m-%d") if hasattr(fecha_fin, "strftime") else str(fecha_fin)
+    with closing(get_connection_raw()) as conn:
+        df = pd.read_sql(sql, conn, params=(id_parcela, fecha_ini, fecha_fnl), parse_dates=["fecha"])
+    return df if not df.empty else None
+
+
+@st.cache_data(show_spinner="Cargando extrapolación…")
+def cargar_extrapolacion_prediccion(id_prediccion: int) -> dict | None:
+    """
+    Carga la serie extrapolada (cola proyectada) de una predicción.
+
+    Retorna
+    -------
+    dict | None
+        ``{"EVI": pd.Series, "LSWI": pd.Series}`` con DatetimeIndex,
+        o ``None`` si no hay datos.
+    """
+    from contextlib import closing
+    from utils.conexionDB import get_connection_raw
+
+    sql = """
+        SELECT fecha, evi_extrapolado, lswi_extrapolado
+        FROM series_extrapoladas_ventana
+        WHERE id_prediccion = ?
+        ORDER BY fecha
+    """
+    with closing(get_connection_raw()) as conn:
+        df = pd.read_sql(sql, conn, params=(id_prediccion,), parse_dates=["fecha"])
+    if df.empty:
+        return None
+    evi = df.set_index("fecha")["evi_extrapolado"].dropna()
+    lswi = df.set_index("fecha")["lswi_extrapolado"].dropna()
+    if evi.empty and lswi.empty:
+        return None
+    result = {}
+    if not evi.empty:
+        result["EVI"] = evi
+    if not lswi.empty:
+        result["LSWI"] = lswi
+    return result
 
 
 @st.cache_data(show_spinner="Cargando área de estudio…")

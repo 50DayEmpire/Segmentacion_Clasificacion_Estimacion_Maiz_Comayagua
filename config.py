@@ -39,13 +39,14 @@ ANIOS_HISTORICO = [2020, 2021, 2022, 2023, 2024, 2025]
 ANIO_INICIAL_HISTORICO = 2020
 
 # ── Ventanas de predicción ─────────────────────────────────────────────────────
-VENTANAS = ["T1", "T2", "T3"]
+VENTANAS = ["T1", "T2", "T3", "EOS"]
 
 DIAS_VENTANAS = {
-    "T1": 30,  # días desde el inicio de temporada (SOS)
-    "T2": 60,  # días desde el inicio de temporada (SOS)
-    "T3": 90,  # días desde el inicio de temporada (SOS)
-    "eos":120, # días desde el inicio de temporada (SOS)
+    "T1":  30,  # días desde el inicio de temporada (SOS)
+    "T2":  60,  # días desde el inicio de temporada (SOS)
+    "T3":  90,  # días desde el inicio de temporada (SOS)
+    "eos": 120, # días desde el inicio de temporada (SOS) — EOS date
+    "EOS": 120, # ventana de predicción EOS
 }
 
 # ---- Parámetros para corrección de DN y cálculo de reflectancia real -----------------

@@ -681,16 +681,26 @@ def ejecutar_prediccion_ventana(
     sos_ts = pd.Timestamp(sos_str)
     dias_ventana = DIAS_VENTANAS.get(ventana)
     if dias_ventana is None:
-        print(f"  [ERROR] Ventana '{ventana}' no v\u00e1lida (use T1/T2/T3).")
+        print(f"  [ERROR] Ventana '{ventana}' no v\u00e1lida (use T1/T2/T3/EOS).")
         return None
 
-    fecha_ventana = sos_ts + pd.Timedelta(days=dias_ventana)
+    if ventana == "EOS":
+        if not ciclo.get("eos"):
+            print(f"  [SKIP] Ciclo {id_ciclo} sin fecha EOS real para ventana EOS.")
+            return None
+        fecha_ventana = pd.Timestamp(ciclo["eos"])
+    else:
+        fecha_ventana = sos_ts + pd.Timedelta(days=dias_ventana)
     if fecha_hoy is None:
         fecha_hoy = date.today()
     fecha_hoy_ts = pd.Timestamp(fecha_hoy)
 
+    if ventana == "EOS":
+        desc = f"EOS real = {fecha_ventana.date()}"
+    else:
+        desc = f"SOS+{dias_ventana}d = {fecha_ventana.date()}"
     print(f"\n[WFLOW] Predicci\u00f3n ciclo {id_ciclo} | parcela {id_parcela} | "
-          f"{ventana} (SOS+{dias_ventana}d = {fecha_ventana.date()})")
+          f"{ventana} ({desc})")
 
     if fecha_ventana > fecha_hoy_ts:
         print(f"  [SKIP] fecha_ventana ({fecha_ventana.date()}) > fecha_hoy ({fecha_hoy}).")
@@ -755,6 +765,20 @@ def ejecutar_prediccion_ventana(
     else:
         print(f"  [OK] Predicci\u00f3n completada: "
               f"{resultado.get('yield_qq_ha', 'N/A'):.1f} qq/ha")
+        if ventana == "EOS":
+            with closing(get_connection_raw()) as conn:
+                conn.execute("""
+                    UPDATE produccion_acumulada_ciclo
+                    SET rendimiento = ?, produccion_total = ?
+                    WHERE id_ciclo = ?
+                """, (
+                    resultado.get("yield_qq_ha"),
+                    resultado.get("yield_qq_parcela"),
+                    id_ciclo,
+                ))
+            print(f"  [UPDATE] produccion_acumulada_ciclo: rendimiento="
+                  f"{resultado.get('yield_qq_ha', 'N/A'):.1f} qq/ha, "
+                  f"produccion_total={resultado.get('yield_qq_parcela', 'N/A'):.1f} qq")
 
     return resultado
 
