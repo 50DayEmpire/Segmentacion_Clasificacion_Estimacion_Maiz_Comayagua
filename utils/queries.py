@@ -112,6 +112,87 @@ def cargar_datos_series(parcela_id: int) -> dict | None:
         return None
 
 
+@st.cache_data(show_spinner="Cargando ciclos históricos…")
+def cargar_ciclos_historicos(
+    anio: int | None = None,
+    temporada: str | None = None,
+    id_parcela: int | None = None,
+) -> pd.DataFrame:
+    """
+    Consulta ``produccion_acumulada_ciclo`` con filtros opcionales
+    de año de SOS, temporada y parcela.
+
+    Parámetros
+    ----------
+    anio : int | None
+        Año del SOS (se extrae con ``strftime('%Y', sos)``).
+    temporada : str | None
+        ``'primera'`` o ``'postrera'``.
+    id_parcela : int | None
+        Filtra por parcela específica.
+
+    Retorna
+    -------
+    pd.DataFrame
+        Columnas: id_ciclo, id_parcela, temporada, sos, t1, t2, t3, eos,
+        rendimiento, produccion_total, lswi_max, estado_ciclo.
+    """
+    from contextlib import closing
+    from utils.conexionDB import get_connection_raw
+
+    condiciones: list[str] = []
+    params: list = []
+
+    if anio is not None:
+        condiciones.append("CAST(strftime('%Y', sos) AS INTEGER) = ?")
+        params.append(anio)
+    if temporada is not None:
+        condiciones.append("temporada = ?")
+        params.append(temporada)
+    if id_parcela is not None:
+        condiciones.append("id_parcela = ?")
+        params.append(id_parcela)
+
+    where = f"WHERE {' AND '.join(condiciones)}" if condiciones else ""
+
+    sql = f"""
+        SELECT id_ciclo, id_parcela, temporada, sos,
+               t1, t2, t3, eos,
+               rendimiento, produccion_total, lswi_max, estado_ciclo
+        FROM produccion_acumulada_ciclo
+        {where}
+        ORDER BY sos, id_parcela
+    """
+    with closing(get_connection_raw()) as conn:
+        return pd.read_sql(sql, conn, params=params, parse_dates=["sos", "t1", "t2", "t3", "eos"])
+
+
+@st.cache_data(show_spinner="Cargando predicciones…")
+def cargar_predicciones_ciclo(id_ciclo: int) -> pd.DataFrame:
+    """
+    Consulta ``predicciones_ventana`` para un ciclo dado.
+
+    Retorna
+    -------
+    pd.DataFrame
+        Columnas: ventana, fecha_ventana, gpp_acumulado, npp_acumulado,
+        rendimiento_estimado_qq_ha, rendimiento_estimado_qq_parcela.
+    """
+    from contextlib import closing
+    from utils.conexionDB import get_connection_raw
+
+    sql = """
+        SELECT ventana, fecha_ventana,
+               gpp_acumulado, npp_acumulado,
+               rendimiento_estimado_qq_ha, rendimiento_estimado_qq_parcela
+        FROM predicciones_ventana
+        WHERE id_ciclo = ?
+        ORDER BY ventana
+    """
+    with closing(get_connection_raw()) as conn:
+        return pd.read_sql(sql, conn, params=(id_ciclo,), parse_dates=["fecha_ventana"])
+
+
 @st.cache_data(show_spinner="Cargando área de estudio…")
 def cargar_municipio() -> gpd.GeoDataFrame:
     """

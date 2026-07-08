@@ -261,6 +261,7 @@ def crear_ciclo_historico(
     id_parcela: int,
     sos_fecha: pd.Timestamp | date,
     lswi_max: float | None = None,
+    eos_fecha: pd.Timestamp | date | None = None,
 ) -> int:
     """
     Crea un registro histórico en ``produccion_acumulada_ciclo`` con
@@ -274,6 +275,9 @@ def crear_ciclo_historico(
         Fecha de inicio de temporada detectada.
     lswi_max : float, opcional
         Valor máximo de LSWI para la parcela (puede calcularse después).
+    eos_fecha : pd.Timestamp | date, opcional
+        Fecha real de fin de ciclo (valle segmentado). Si se omite,
+        se calcula como ``sos + DIAS_VENTANAS["eos"]``.
 
     Retorna
     -------
@@ -286,7 +290,7 @@ def crear_ciclo_historico(
     t1 = sos + timedelta(days=DIAS_VENTANAS["T1"])
     t2 = sos + timedelta(days=DIAS_VENTANAS["T2"])
     t3 = sos + timedelta(days=DIAS_VENTANAS["T3"])
-    eos = sos + timedelta(days=DIAS_VENTANAS["eos"])
+    eos = pd.Timestamp(eos_fecha).normalize() if eos_fecha is not None else sos + timedelta(days=DIAS_VENTANAS["eos"])
 
     sql = """
         INSERT INTO produccion_acumulada_ciclo

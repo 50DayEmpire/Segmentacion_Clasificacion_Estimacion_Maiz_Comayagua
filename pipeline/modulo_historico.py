@@ -30,7 +30,7 @@ from config import (
     OPENEO,
     OPENEOFED,
 )
-from pipeline.ingesta import obtener_indices_por_lotes, obtener_clima_por_lotes
+from pipeline.ingesta import obtener_indices_por_lotes, obtener_clima_por_lotes, cargar_indices_desde_bd, cargar_clima_desde_bd
 from contextlib import closing
 
 from utils.aplicar_whittaker import aplicar_whittaker_series
@@ -196,8 +196,8 @@ def obtener_lswi_max_ultimo_ciclo(
 def seed_series_historicas(
     fecha_fin: str | None = None,
     lambda_param: float = 4000.0,
-    distancia_min_dias: int = 90,
-    prominencia_min: float = 0.15,
+    distancia_min_dias: int = 70,
+    prominencia_min: float = 0.05,
 ) -> dict:
     """
     Pobla y procesa todos los datos históricos (índices, clima, ciclos).
@@ -222,9 +222,9 @@ def seed_series_historicas(
     lambda_param : float, opcional
         Parámetro de suavizado Whittaker (default 4000.0).
     distancia_min_dias : int, opcional
-        Separación mínima entre valles para segmentación (default 90).
+        Separación mínima entre valles para segmentación (default 70).
     prominencia_min : float, opcional
-        Profundidad mínima del valle para segmentación (default 0.15).
+        Profundidad mínima del valle para segmentación (default 0.05).
 
     Retorna
     -------
@@ -430,6 +430,235 @@ def seed_series_historicas(
         print(f"\n[PRED] Sin ciclos creados, se omite generación de predicciones.")
 
     # ── Resultado ──────────────────────────────────────────────────────────
+    return {
+        "indices_crudos": dfs_indices,
+        "clima": dfs_clima,
+        "evi_suavizado": df_evi,
+        "segmentos_por_parcela": segmentos_por_parcela,
+        "sos_por_segmento": sos_por_segmento,
+    }
+
+
+def seed_historico_offline(
+    fecha_inicio: str | None = None,
+    fecha_fin: str | None = None,
+    lambda_param: float = 4000.0,
+    distancia_min_dias: int = 70,
+    prominencia_min: float = 0.05,
+    factor_sos: float = 0.2,
+) -> dict:
+    """
+    Seed histórico OFFLINE: lee índices y clima desde la BD local (sin openEO),
+    elimina y recalcula ciclos, SOS, LSWI max, climatología y predicciones.
+
+    No toca ``series_diarias_vpm`` (índices crudos ni datos climáticos).
+
+    Parámetros
+    ----------
+    fecha_inicio : str, opcional
+        Fecha inicial del rango a procesar ("YYYY-MM-DD").
+        Por defecto: ``ANIO_INICIAL_HISTORICO-01-01``.
+    fecha_fin : str, opcional
+        Fecha final del rango a procesar ("YYYY-MM-DD").
+        Por defecto: fecha actual.
+    lambda_param : float, opcional
+        Parámetro de suavizado Whittaker (default 4000.0).
+    distancia_min_dias : int, opcional
+        Separación mínima entre valles para segmentación (default 70).
+    prominencia_min : float, opcional
+        Profundidad mínima del valle para segmentación (default 0.05).
+    factor_sos : float, opcional
+        Fracción de la amplitud usada como umbral SOS (default 0.2).
+
+    Retorna
+    -------
+    dict con las mismas claves que ``seed_series_historicas``.
+    """
+    if fecha_fin is None:
+        fecha_fin = date.today().isoformat()
+    if fecha_inicio is None:
+        fecha_inicio = f"{ANIO_INICIAL_HISTORICO}-01-01"
+
+    print(f"[OFFLINE] Rango: [{fecha_inicio} → {fecha_fin}]", flush=True)
+
+    # ── 1. Eliminar cálculos anteriores (replace) ─────────────────────────
+    print("[CLEAN] Eliminando cálculos previos...", flush=True)
+    tablas_orden = [
+        "series_extrapoladas_ventana",
+        "predicciones_ventana",
+        "indices_suavizados",
+        "produccion_acumulada_ciclo",
+        "lswi_maximo",
+        "climatologia_diaria",
+    ]
+    with closing(get_connection_raw()) as conn:
+        with conn:
+            for tabla in tablas_orden:
+                n = conn.execute(f"DELETE FROM {tabla}").rowcount
+                print(f"    → {tabla}: {n} fila(s) eliminada(s).", flush=True)
+
+    # ── 2. Cargar índices crudos desde BD ────────────────────────────────
+    print(f"\n[SAT] Cargando índices desde BD...", flush=True)
+    dfs_indices = cargar_indices_desde_bd(fecha_inicio, fecha_fin)
+    print(f"    → EVI: {dfs_indices['EVI'].shape[0]} fechas, "
+          f"{dfs_indices['EVI'].shape[1]} parcelas", flush=True)
+    print(f"    → LSWI: {dfs_indices['LSWI'].shape[0]} fechas, "
+          f"{dfs_indices['LSWI'].shape[1]} parcelas", flush=True)
+
+    # ── 3. Cargar datos climáticos desde BD ──────────────────────────────
+    print(f"\n[CLIMA] Cargando datos climáticos desde BD...", flush=True)
+    dfs_clima = cargar_clima_desde_bd(fecha_inicio, fecha_fin)
+    print(f"    → Temperatura: {dfs_clima['temperature-mean'].shape[0]} fechas", flush=True)
+    print(f"    → Radiación: {dfs_clima['solar-radiation-flux'].shape[0]} fechas", flush=True)
+
+    # ── 4. Climatología ──────────────────────────────────────────────────
+    print(f"\n[CHART] Calculando y persistiendo climatología...", flush=True)
+    df_temp = dfs_clima["temperature-mean"]
+    df_ssrd = dfs_clima["solar-radiation-flux"]
+
+    serie_temp = df_temp.iloc[:, 0].dropna()
+    serie_par = (df_ssrd.iloc[:, 0] / 1e6 * 0.45).dropna()
+
+    clima_temp = construir_climatologia_diaria(serie_temp)
+    clima_par = construir_climatologia_diaria(serie_par)
+
+    anio_min = serie_temp.index.year.min()
+    anio_max = serie_temp.index.year.max()
+
+    guardar_climatologia_diaria(clima_par, clima_temp, anio_min, anio_max)
+    print(f"    → Climatología persistida (años {anio_min}-{anio_max}).", flush=True)
+
+    # ── 5. Suavizado Whittaker sobre EVI ─────────────────────────────────
+    print(f"\n[GEAR] Suavizando EVI con Whittaker-Eilers...", flush=True)
+    df_evi = dfs_indices["EVI"].copy()
+
+    df_evi = df_evi.mask((df_evi < -1.0) | (df_evi > 1.0), np.nan)
+
+    rango_diario = pd.date_range(
+        start=df_evi.index.min(),
+        end=df_evi.index.max(),
+        freq="D",
+    )
+    df_evi = df_evi.reindex(rango_diario)
+
+    dfs_suavizado = aplicar_whittaker_series(
+        {"EVI": df_evi},
+        lambda_param=lambda_param,
+    )
+    df_evi = dfs_suavizado["EVI"]
+    print(f"    → EVI suavizado: {df_evi.shape[0]} días, "
+          f"{df_evi.shape[1]} parcelas", flush=True)
+
+    # ── 6. Segmentación de ciclos por parcela ────────────────────────────
+    print(f"\n[SEED] Segmentando ciclos fenológicos por parcela...", flush=True)
+    segmentos_por_parcela: dict[int, list[tuple[pd.Timestamp, pd.Timestamp]]] = {}
+
+    for col in df_evi.columns:
+        try:
+            id_parcela = int(col.split("_")[1])
+        except (IndexError, ValueError):
+            continue
+
+        serie = df_evi[col].dropna()
+        if serie.empty:
+            continue
+
+        segmentos = segmentar_ciclos(
+            serie=serie,
+            distancia_min_dias=distancia_min_dias,
+            prominencia_min=prominencia_min,
+        )
+        segmentos_por_parcela[id_parcela] = segmentos
+
+    n_con_segmentos = len(segmentos_por_parcela)
+    total_segmentos = sum(len(v) for v in segmentos_por_parcela.values())
+    print(f"    → {n_con_segmentos} parcela(s) con segmentos detectados "
+          f"({total_segmentos} ciclos en total).", flush=True)
+
+    # ── 7. LSWI máximo histórico ─────────────────────────────────────────
+    print(f"\n[WAVE] Calculando LSWI máximo desde los primeros 2 segmentos...", flush=True)
+    seed_lswi_max(
+        dfs_indices["LSWI"],
+        segmentos_por_parcela,
+        lambda_param=lambda_param,
+    )
+
+    # ── 8. Detección de SOS por segmento y persistencia ───────────────────
+    print(f"\n[SEED] Detectando SOS en cada segmento...", flush=True)
+    sos_por_segmento: dict[int, list[dict]] = {}
+    sos_detectados = 0
+    ciclos_creados = 0
+    ciclos_creados_info: list[dict] = []
+
+    for id_parcela, segmentos in segmentos_por_parcela.items():
+        col = f"id_{id_parcela}"
+        if col not in df_evi.columns:
+            continue
+
+        lista_resultados = []
+        for inicio, fin in segmentos:
+            serie_seg = df_evi.loc[inicio:fin, col].dropna()
+            if serie_seg.empty:
+                continue
+
+            resultado = detectar_sos(
+                serie=serie_seg.values,
+                fechas=serie_seg.index,
+                factor=factor_sos,
+                ventana_busqueda=(inicio, fin),
+            )
+            resultado["inicio_segmento"] = inicio
+            resultado["fin_segmento"] = fin
+            lista_resultados.append(resultado)
+
+            sos_fecha = resultado.get("sos_fecha")
+            if sos_fecha is not None:
+                sos_detectados += 1
+                id_ciclo = crear_ciclo_historico(
+                    id_parcela=id_parcela,
+                    sos_fecha=sos_fecha,
+                    eos_fecha=fin,
+                )
+                ciclos_creados += 1
+                ciclos_creados_info.append({
+                    "id_ciclo": id_ciclo,
+                    "id_parcela": id_parcela,
+                    "sos_fecha": sos_fecha,
+                })
+
+        if lista_resultados:
+            sos_por_segmento[id_parcela] = lista_resultados
+
+    print(f"    → SOS detectado en {sos_detectados}/{total_segmentos} segmentos "
+          f"({len(sos_por_segmento)} parcelas).", flush=True)
+    print(f"    → {ciclos_creados} ciclo(s) histórico(s) creado(s) en BD.", flush=True)
+
+    # ── 9. Predicciones por ventana para cada ciclo histórico ─────────────
+    if ciclos_creados_info:
+        from datetime import date as _date
+        from config import VENTANAS, DIAS_VENTANAS as _DV
+        from pipeline.flujos_trabajo import ejecutar_prediccion_ventana
+
+        hoy = _date.today()
+        print(f"\n[PRED] Generando predicciones para {len(ciclos_creados_info)} ciclo(s)...", flush=True)
+        predicciones_ok = 0
+        for cinfo in ciclos_creados_info:
+            for ventana in VENTANAS:
+                fecha_ventana = cinfo["sos_fecha"] + pd.Timedelta(days=_DV[ventana])
+                if fecha_ventana.date() > hoy:
+                    continue
+                res = ejecutar_prediccion_ventana(
+                    id_ciclo=cinfo["id_ciclo"],
+                    ventana=ventana,
+                    fecha_hoy=hoy,
+                    lambda_param=lambda_param,
+                )
+                if res is not None:
+                    predicciones_ok += 1
+        print(f"    → {predicciones_ok} prediccion(es) generada(s) exitosamente.", flush=True)
+    else:
+        print(f"\n[PRED] Sin ciclos creados, se omite generación de predicciones.", flush=True)
+
     return {
         "indices_crudos": dfs_indices,
         "clima": dfs_clima,

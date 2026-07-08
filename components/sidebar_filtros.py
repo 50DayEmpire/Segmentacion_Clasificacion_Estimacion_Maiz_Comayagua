@@ -215,3 +215,59 @@ def render_filtros_resumen() -> dict:
     )
 
     return {"ciclo": ciclo, "ventana": ventana}
+
+
+def render_filtros_historico() -> dict:
+    """
+    Filtros para la vista Análisis Histórico.
+
+    Retorna
+    -------
+    dict con claves:
+        anio        : int  — año seleccionado
+        ciclo       : str  — 'primera' | 'postrera'
+        id_ciclo    : int | None — ciclo específico seleccionado
+        ventana     : str  — 'T1' | 'T2' | 'T3'
+    """
+    _encabezado_sidebar()
+    st.markdown("### 🗂️ Filtros — Histórico")
+
+    from config import CICLOS, VENTANAS, ANIOS_HISTORICO, COLORES_CICLO
+
+    etiqueta_ciclo = st.selectbox(
+        "Ciclo de siembra",
+        options=list(CICLOS.keys()),
+        help="Filtra por temporada de cultivo.",
+    )
+    ciclo = CICLOS[etiqueta_ciclo]
+
+    anio = st.select_slider(
+        "Año histórico",
+        options=ANIOS_HISTORICO,
+        value=ANIOS_HISTORICO[-1],
+        key="timeline_anio",
+    )
+
+    st.markdown("---")
+
+    ventana = st.select_slider(
+        "Ventana de predicción",
+        options=VENTANAS,
+        value="T3",
+        help="T3 proporciona la estimación más completa del ciclo.",
+    )
+
+    color = COLORES_CICLO[ciclo]
+    st.markdown(
+        f"""
+        <div style='margin-top:1rem; padding:.5rem .8rem;
+                    border-left:4px solid {color}; background:#1a1d23;
+                    border-radius:4px; font-size:.85rem;'>
+            {etiqueta_ciclo} · {anio}
+            &nbsp;·&nbsp; Ventana: <b>{ventana}</b>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    return {"anio": anio, "ciclo": ciclo, "ventana": ventana}

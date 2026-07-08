@@ -27,11 +27,10 @@ from utils.capas_folium import agregar_capa_poligonos
 def _construir_mapa_base(centrar_en_estudio: bool) -> folium.Map:
     """
     Crea el mapa Folium base.
-    Si centrar_en_estudio=True hace fit_bounds al municipio;
-    si no, usa el centro y zoom por defecto.
+    Si centrar_en_estudio=True, se inicializa a zoom 11 y luego
+    se aplica fit_bounds al municipio; si no, usa centro/zoom por defecto.
     """
     if centrar_en_estudio:
-        # Inicializar en centro del municipio; fit_bounds se aplica después
         mapa = folium.Map(
             location=[MAPA_CENTRO_LAT, MAPA_CENTRO_LON],
             zoom_start=11,
@@ -112,7 +111,12 @@ def _agregar_leyenda_flotante(mapa: folium.Map, modo_color: str) -> None:
     mapa.get_root().html.add_child(folium.Element(html))
 
 
-def render_mapa_parcelas(filtros: dict) -> dict | None:
+def render_mapa_parcelas(
+    filtros: dict,
+    key: str | None = None,
+    center: list[float] | None = None,
+    zoom: int | None = None,
+) -> dict | None:
     """
     Renderiza el mapa interactivo de parcelas.
 
@@ -120,11 +124,19 @@ def render_mapa_parcelas(filtros: dict) -> dict | None:
     ----------
     filtros : dict
         Claves: 'ciclo', 'ventana', 'modo_color'.
+    key : str, opcional
+        Clave para ``st_folium``. Si se omite, se genera automáticamente
+        a partir de los filtros (útil para evitar remontajes cuando
+        solo cambia la ventana de predicción).
+    center : list[float] | None, opcional
+        Centro del mapa ``[lat, lng]`` para restaurar vista previa.
+    zoom : int | None, opcional
+        Nivel de zoom para restaurar vista previa.
 
     Retorna
     -------
     dict | None
-        Resultado de ``st_folium`` con ``last_object_clicked``.
+        Resultado de ``st_folium`` con ``last_object_clicked``, ``center``, ``zoom``.
     """
     ciclo      = filtros.get("ciclo", "primera")
     ventana    = filtros.get("ventana", "T1")
@@ -236,10 +248,15 @@ def render_mapa_parcelas(filtros: dict) -> dict | None:
     )
 
     # ── Renderizado con st_folium ──────────────────────────────────────────────
-    return st_folium(
-        mapa,
+    map_key = key or f"mapa_parcelas_{ciclo}_{ventana}_{modo_color}_v{st.session_state['centrar_revision']}"
+    kwargs = dict(
         width="100%",
         height=560,
-        returned_objects=["last_object_clicked"],
-        key=f"mapa_parcelas_{ciclo}_{ventana}_{modo_color}_v{st.session_state['centrar_revision']}",
+        returned_objects=["last_object_clicked", "center", "zoom"],
+        key=map_key,
     )
+    if center is not None:
+        kwargs["center"] = center
+    if zoom is not None:
+        kwargs["zoom"] = zoom
+    return st_folium(mapa, **kwargs)

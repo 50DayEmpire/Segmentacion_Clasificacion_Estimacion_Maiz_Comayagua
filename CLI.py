@@ -14,6 +14,7 @@ import sqlite3
 import sys
 import textwrap
 from contextlib import closing
+from datetime import date
 from pathlib import Path
 
 import pandas as pd
@@ -1471,12 +1472,15 @@ def _menu_historico() -> None:
     while True:
         _seccion("8 · Procesamiento Histórico")
         key = _menu({
-            "seed_series": "Ejecutar seed de series históricas (índices + clima + ciclos + predicciones)",
+            "seed_series":  "Ejecutar seed de series históricas (índices + clima + ciclos + predicciones)",
+            "seed_offline": "Seed histórico OFFLINE (lee desde BD, sin openEO, reemplaza cálculos)",
         })
         if key == "0":
             return
         elif key == "seed_series":
             _accion_seed_series_historicas()
+        elif key == "seed_offline":
+            _accion_seed_historico_offline()
 
 
 def _accion_seed_series_historicas() -> None:
@@ -1501,6 +1505,48 @@ def _accion_seed_series_historicas() -> None:
         return
 
     _ok("Seed histórico completado.")
+    print()
+    n_segmentos = sum(len(v) for v in resultado.get("segmentos_por_parcela", {}).values())
+    n_sos = len(resultado.get("sos_por_segmento", {}))
+    print(f"  Segmentos detectados  : {n_segmentos}")
+    print(f"  Parcelas con SOS      : {n_sos}")
+    _pausar()
+
+
+def _accion_seed_historico_offline() -> None:
+    _seccion("Seed histórico OFFLINE")
+    _warn("Este proceso LEE índices EVI/LSWI y clima desde la BD local "
+          "(sin conexión openEO), ELIMINA todos los ciclos, predicciones, "
+          "LSWI max y climatología existentes, y recalcula todo desde cero. "
+          "No modifica series_diarias_vpm (datos crudos).")
+    print()
+    confirmar = _pedir("¿Continuar? (s/n)", "n")
+    if confirmar.lower() != "s":
+        _info("Cancelado.")
+        return
+
+    _info("Parámetros opcionales (Enter para usar valores por defecto):")
+    fecha_inicio = _pedir("fecha_inicio", "2020-01-01")
+    fecha_fin = _pedir("fecha_fin", date.today().isoformat())
+    distancia_min_dias = int(_pedir("distancia_min_dias", "70"))
+    prominencia_min = float(_pedir("prominencia_min", "0.05"))
+    factor_sos = float(_pedir("factor_sos", "0.2"))
+
+    from pipeline.modulo_historico import seed_historico_offline
+    try:
+        resultado = seed_historico_offline(
+            fecha_inicio=fecha_inicio or None,
+            fecha_fin=fecha_fin or None,
+            distancia_min_dias=distancia_min_dias,
+            prominencia_min=prominencia_min,
+            factor_sos=factor_sos,
+        )
+    except Exception as exc:
+        _error(f"Error durante el seed offline: {exc}")
+        _pausar()
+        return
+
+    _ok("Seed offline completado.")
     print()
     n_segmentos = sum(len(v) for v in resultado.get("segmentos_por_parcela", {}).values())
     n_sos = len(resultado.get("sos_por_segmento", {}))
