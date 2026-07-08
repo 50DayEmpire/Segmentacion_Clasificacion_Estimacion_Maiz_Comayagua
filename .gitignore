@@ -21,7 +21,6 @@ build/
 
 # ── Datos y modelos entrenados ─────────────────────────────────────────────────
 
-*.gpkg
 *.geojson
 *.shp
 *.shx
