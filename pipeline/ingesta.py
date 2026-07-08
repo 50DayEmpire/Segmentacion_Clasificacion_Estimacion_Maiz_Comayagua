@@ -18,6 +18,7 @@ import numpy as np
 import openeo
 import pandas as pd
 from config import ESCALA, BOA_OFFSET
+from typing import Literal
 
 from utils.dict_a_dataframe import openeo_dict_to_dataframes
 from utils.conexionDB import get_connection_raw
@@ -739,15 +740,21 @@ def _fechas_consultadas_clima(
 def _partir_en_anios(fecha_inicio: str, fecha_fin: str) -> list[tuple[str, str]]:
     """
     Divide el rango [fecha_inicio, fecha_fin] en lotes por año calendario.
+
+    Los lotes de años completos usan ``f"{anio+1}-01-01"`` como fecha de fin
+    para evitar que openEO excluya el 31 de diciembre por ambigüedad en la
+    interpretación del extremo del ``temporal_extent``.
     """
     inicio = pd.Timestamp(fecha_inicio)
     fin = pd.Timestamp(fecha_fin)
     lotes: list[tuple[str, str]] = []
     for anio in range(inicio.year, fin.year + 1):
         l_ini = max(inicio, pd.Timestamp(f"{anio}-01-01"))
-        l_fin = min(fin, pd.Timestamp(f"{anio}-12-31"))
-        if l_ini <= l_fin:
-            lotes.append((str(l_ini.date()), str(l_fin.date())))
+        if anio < fin.year:
+            l_fin_str = f"{anio + 1}-01-01"
+        else:
+            l_fin_str = str(fin.date())
+        lotes.append((str(l_ini.date()), l_fin_str))
     return lotes
 
 
@@ -884,26 +891,43 @@ def obtener_indices(
     # ── 2. Detectar gaps ──────────────────────────────────────────────────────
     gaps = _detectar_gaps(fecha_inicio, fecha_fin, fechas_cubiertas)
 
+    # Ajustar extremos para semántica [start, end) de openEO:
+    # si start == end, extender end a end+1 para que el día sea incluido.
+    gaps = [
+        (s, (pd.Timestamp(e) + pd.Timedelta(days=1)).strftime("%Y-%m-%d"))
+        if s == e else (s, e)
+        for s, e in gaps
+    ]
+
     if not gaps:
         print(f"✅  Índices: BD cubre el rango completo [{fecha_inicio} → {fecha_fin}]. Sin descarga openEO.")
-        # Cargar los valores (incluye NaN por nubes) para devolver el DataFrame completo
         try:
             return cargar_indices_desde_bd(fecha_inicio=fecha_inicio, fecha_fin=fecha_fin)
         except ValueError:
-            # Todas las filas existen pero todos los valores son NaN — devolver igual
             return cargar_indices_desde_bd(fecha_inicio=fecha_inicio, fecha_fin=fecha_fin)
 
-    print(f"📡  Índices: {len(gaps)} gap(s) detectado(s) → se descargarán de openEO:")
+    print(f"📡  Índices: {len(gaps)} gap(s) a descargar de openEO:")
     for g_ini, g_fin in gaps:
         print(f"     • {g_ini} → {g_fin}")
 
     # ── 3. Descargar cada gap y persistir ─────────────────────────────────────
     for g_ini, g_fin in gaps:
         print(f"\n🛰️  Descargando gap [{g_ini} → {g_fin}]...")
-        dfs_gap = obtener_datacube_indices_crudo(
-            connection, geojson_openeo, g_ini, g_fin, config_cloud_mask
-        )
-        guardar_indices_crudos(dfs_gap, mode="append")
+        try:
+            dfs_gap = obtener_datacube_indices_crudo(
+                connection, geojson_openeo, g_ini, g_fin, config_cloud_mask
+            )
+        except Exception as exc:
+            print(f"  ⚠️  Gap [{g_ini} → {g_fin}]: error ignorado — {exc}")
+            continue
+        if all(df.empty for df in dfs_gap.values()):
+            print(f"  ⚠️  Gap [{g_ini} → {g_fin}]: sin datos retornados, se omite.")
+            continue
+        try:
+            guardar_indices_crudos(dfs_gap, mode="append")
+        except Exception as exc:
+            print(f"  ⚠️  Gap [{g_ini} → {g_fin}]: error al persistir — {exc}")
+            continue
 
     # ── 4. Recargar desde BD (fuente de verdad) y devolver rango completo ─────
     # Se recarga desde BD en lugar de consolidar en memoria para garantizar que
@@ -970,21 +994,40 @@ def obtener_clima(
     # ── 2. Detectar gaps ──────────────────────────────────────────────────────
     gaps = _detectar_gaps(fecha_inicio, fecha_fin, fechas_cubiertas)
 
+    # Ajustar extremos para semántica [start, end) de openEO:
+    # si start == end, extender end a end+1 para que el día sea incluido.
+    gaps = [
+        (s, (pd.Timestamp(e) + pd.Timedelta(days=1)).strftime("%Y-%m-%d"))
+        if s == e else (s, e)
+        for s, e in gaps
+    ]
+
     if not gaps:
         print(f"✅  Clima: BD cubre el rango completo [{fecha_inicio} → {fecha_fin}]. Sin descarga openEO.")
         return cargar_clima_desde_bd(fecha_inicio=fecha_inicio, fecha_fin=fecha_fin)
 
-    print(f"🌤️  Clima: {len(gaps)} gap(s) detectado(s) → se descargarán de openEO:")
+    print(f"🌤️  Clima: {len(gaps)} gap(s) a descargar de openEO:")
     for g_ini, g_fin in gaps:
         print(f"     • {g_ini} → {g_fin}")
 
     # ── 3. Descargar cada gap y persistir ─────────────────────────────────────
     for g_ini, g_fin in gaps:
         print(f"\n🌍  Descargando gap climático [{g_ini} → {g_fin}]...")
-        dfs_gap = obtener_datos_climaticos_crudo(
-            connection, geojson_openeo, g_ini, g_fin, num_parc
-        )
-        guardar_datos_climaticos(dfs_gap, mode="append")
+        try:
+            dfs_gap = obtener_datos_climaticos_crudo(
+                connection, geojson_openeo, g_ini, g_fin, num_parc
+            )
+        except Exception as exc:
+            print(f"  ⚠️  Gap [{g_ini} → {g_fin}]: error ignorado — {exc}")
+            continue
+        if all(df.empty for df in dfs_gap.values()):
+            print(f"  ⚠️  Gap climático [{g_ini} → {g_fin}]: sin datos retornados, se omite.")
+            continue
+        try:
+            guardar_datos_climaticos(dfs_gap, mode="append")
+        except Exception as exc:
+            print(f"  ⚠️  Gap climático [{g_ini} → {g_fin}]: error al persistir — {exc}")
+            continue
 
     # ── 4. Recargar desde BD (fuente de verdad) y devolver rango completo ─────
     return cargar_clima_desde_bd(fecha_inicio=fecha_inicio, fecha_fin=fecha_fin)

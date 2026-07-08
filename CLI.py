@@ -456,6 +456,7 @@ def _menu_bd() -> None:
             "series":     "Ver series_diarias_vpm",
             "produccion": "Ver produccion_acumulada_ciclo",
             "parcelas":   "Ver parcelas_vigentes",
+            "cobertura":  "Reporte de cobertura BD vs servidor",
             "sql":        "Ejecutar SQL personalizado",
             "limpiar":    "Limpiar tabla series_diarias_vpm",
         })
@@ -469,6 +470,8 @@ def _menu_bd() -> None:
             _accion_ver_tabla("produccion_acumulada_ciclo", limit=30)
         elif key == "parcelas":
             _accion_ver_parcelas()
+        elif key == "cobertura":
+            _accion_reporte_cobertura()
         elif key == "sql":
             _accion_sql_libre()
         elif key == "limpiar":
@@ -533,6 +536,16 @@ def _accion_sql_libre() -> None:
     except Exception as exc:
         _error(str(exc))
     _pausar()
+
+def _accion_reporte_cobertura() -> None:
+    _seccion("Reporte de cobertura BD vs servidor")
+    from utils.reporte_cobertura import reporte_cobertura
+    try:
+        resultado = reporte_cobertura()
+    except Exception as exc:
+        _error(f"Error generando reporte: {exc}")
+    _pausar()
+
 
 def _accion_limpiar_series() -> None:
     _seccion("Limpiar series_diarias_vpm")

@@ -388,14 +388,10 @@ def detectar_y_persistir_sos_ciclo(
         "t3": str(t3.date()),
     }
 
-
-#===================================================================================================================
-#                                     Experimental
-#===================================================================================================================
 from scipy.signal import find_peaks
 
-def segmentar_ciclos(serie: pd.Series, distancia_min_dias: int = 90,
-                      prominencia_min: float = 0.15) -> list[tuple[pd.Timestamp, pd.Timestamp]]:
+def segmentar_ciclos(serie: pd.Series, distancia_min_dias: int = 70,
+                      prominencia_min: float = 0.05) -> list[tuple[pd.Timestamp, pd.Timestamp]]:
     """
     Segmenta una serie suavizada multi-anual (EVI o LSWI, post-Whittaker)
     en ciclos individuales, delimitados por valles consecutivos. De carácter
@@ -412,10 +408,12 @@ def segmentar_ciclos(serie: pd.Series, distancia_min_dias: int = 90,
         duración esperada de un ciclo (120 días) pero mayor que cualquier
         fluctuación de corto plazo esperada dentro del ciclo.
     prominencia_min : float
-        Profundidad mínima del valle relativa a sus vecinos, en las
-        mismas unidades que `serie` (EVI/LSWI). Filtra valles poco
+        Si está en (0, 1): fracción del rango dinámico (max-min) de la serie.
+        Si está en [1, inf): valor absoluto en las mismas unidades que `serie`.
+        Por defecto 0.05 = 5% del rango dinámico. Filtra valles poco
         profundos que no representan un verdadero fin de ciclo
         (suelo desnudo / rastrojo) sino ruido dentro de la temporada.
+    Valores por defecto calibrados mayormente para EVI.
 
     Retorna
     -------
@@ -426,10 +424,13 @@ def segmentar_ciclos(serie: pd.Series, distancia_min_dias: int = 90,
     valores = serie.to_numpy()
     fechas = serie.index
 
+    rango = float(np.nanmax(valores) - np.nanmin(valores))
+    prominencia_abs = prominencia_min * rango if prominencia_min < 1.0 else prominencia_min
+
     valles_idx, propiedades = find_peaks(
         -valores,
         distance=distancia_min_dias,
-        prominence=prominencia_min,
+        prominence=prominencia_abs,
     )
 
     if len(valles_idx) < 2:

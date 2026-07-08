@@ -4,7 +4,7 @@
   "ventana_busqueda_dias": 1,
   "temporada_activa": "primera",
   "factor_sos": 0.2,
-  "ultima_ejecucion": "2026-07-06T22:30:07.729397",
+  "ultima_ejecucion": "2026-07-07T22:30:14.033242",
   "ultima_ejecucion_exitosa": "2026-07-06T22:34:26.389104",
   "proxima_ejecucion": "2026-07-07T16:30:00",
   "dias_fallback_sin_historial_ingesta": 7
