@@ -50,6 +50,7 @@ def _figura_series(
     ventana_fecha: pd.Timestamp | None = None,
     ventana_nombre: str | None = None,
     extrapolado: dict | None = None,
+    validacion: dict | None = None,
 ) -> go.Figure:
     fig = make_subplots(
         rows=len(indices), cols=1,
@@ -93,6 +94,20 @@ def _figura_series(
                 font=dict(color="#4a5568", size=13),
                 row=i, col=1,
             )
+
+        if validacion is not None:
+            val = validacion.get(indice)
+            if val is not None and not val.empty:
+                fig.add_trace(
+                    go.Scatter(
+                        x=val.index, y=val.values,
+                        mode="lines",
+                        name=f"{indice} observado (real)",
+                        line=dict(color="#888888", width=2),
+                        showlegend=True,
+                    ),
+                    row=i, col=1,
+                )
 
         if extrapolado is not None:
             ext = extrapolado.get(indice)

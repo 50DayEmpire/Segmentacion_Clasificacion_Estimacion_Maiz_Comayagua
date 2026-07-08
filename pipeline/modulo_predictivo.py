@@ -338,7 +338,7 @@ def guardar_climatologia_diaria(
     for variable, serie in (("PAR", climatologia_par), ("temperatura", climatologia_temperatura)):
         for dia_anio, valor in serie.items():
             filas.append((id_region, variable, int(dia_anio), float(valor),
-                          anio_min_incluido, anio_max_incluido))
+                          int(anio_min_incluido), int(anio_max_incluido)))
 
     sql_upsert = """
         INSERT INTO climatologia_diaria
@@ -589,6 +589,53 @@ def ejecutar_prediccion_ventana(
 #=================================================================================================
 #                                      Experimental
 #=================================================================================================
+def construir_serie_con_anclas_climatologicas(
+    serie_observada: pd.Series,
+    fecha_sos: pd.Timestamp,
+    fecha_fin_extension: pd.Timestamp,
+    curva_climatologica: pd.Series,  # indexada por días-desde-SOS, mismo tipo de ciclo
+    peso_ancla: float = 0.3,
+) -> tuple[pd.Series, pd.Series]:
+    """
+    Extiende la serie observada con pseudo-observaciones derivadas de la
+    curva climatológica de ciclos previos del mismo tipo, para que
+    Whittaker las use como guía de forma en el tramo no observado, en
+    vez de asumir una forma paramétrica fija (doble logística).
+
+    Retorna
+    -------
+    (serie_extendida_con_nan, pesos)
+        serie_extendida_con_nan: observado + anclas climatológicas,
+        con NaN en los días intermedios que Whittaker debe rellenar.
+        pesos: mismo índice, 1.0 en observado, peso_ancla en anclas, 0 en NaN.
+    """
+    dias_futuros = pd.date_range(
+        serie_observada.index[-1] + pd.Timedelta(days=1),
+        fecha_fin_extension, freq="D",
+    )
+    dias_desde_sos_futuros = (dias_futuros - fecha_sos).days
+
+    # Solo anclar cada N días (ej. cada 5), no todos los días futuros,
+    # para que Whittaker tenga libertad de interpolar suavemente entre anclas
+    indices_ancla = range(0, len(dias_futuros), 5)
+    valores_ancla = curva_climatologica.reindex(dias_desde_sos_futuros).to_numpy()
+
+    valores_futuros = np.full(len(dias_futuros), np.nan)
+    pesos_futuros = np.zeros(len(dias_futuros))
+    for i in indices_ancla:
+        if not np.isnan(valores_ancla[i]):
+            valores_futuros[i] = valores_ancla[i]
+            pesos_futuros[i] = peso_ancla
+
+    serie_futura = pd.Series(valores_futuros, index=dias_futuros)
+    serie_extendida = pd.concat([serie_observada, serie_futura])
+
+    pesos_observado = pd.Series(1.0, index=serie_observada.index)
+    pesos = pd.concat([pesos_observado, pd.Series(pesos_futuros, index=dias_futuros)])
+
+    return serie_extendida, pesos
+
+
 def construir_ensamble_climatico(
     fecha_inicio_ventana: pd.Timestamp,
     fecha_fin_prediccion: pd.Timestamp,

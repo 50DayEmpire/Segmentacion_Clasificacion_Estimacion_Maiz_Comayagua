@@ -176,6 +176,14 @@ if id_parcela_click is not None:
                             elif ext is not None:
                                 extrapolado[idx] = ext
 
+            validacion = {}
+            for idx in ("EVI", "LSWI"):
+                serie = datos_series["smoothed"].get(idx)
+                if serie is not None and not serie.empty:
+                    tramo = serie.loc[fecha_limite:eos]
+                    if not tramo.empty:
+                        validacion[idx] = tramo
+
             fig = _figura_series(
                 f"Parcela {id_parcela_click} — Ciclo #{id_ciclo}",
                 datos_ciclo,
@@ -183,6 +191,7 @@ if id_parcela_click is not None:
                 ventana_fecha=fecha_limite,
                 ventana_nombre=ventana,
                 extrapolado=extrapolado,
+                validacion=validacion,
             )
             st.plotly_chart(fig, use_container_width=True)
 
