@@ -248,7 +248,7 @@ def render_mapa_parcelas(
     )
 
     # ── Renderizado con st_folium ──────────────────────────────────────────────
-    map_key = key or f"mapa_parcelas_{ciclo}_{ventana}_{modo_color}_v{st.session_state['centrar_revision']}"
+    map_key = key or f"mapa_parcelas_{modo_color}_v{st.session_state['centrar_revision']}"
     kwargs = dict(
         width="100%",
         height=560,
