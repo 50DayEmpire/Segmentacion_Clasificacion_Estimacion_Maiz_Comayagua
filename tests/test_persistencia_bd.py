@@ -5,11 +5,11 @@ from pipeline.ingesta import guardar_indices_crudos
 
 def test_upsert_no_borra_gpp_existente(conn_prueba):
     conn_prueba.execute(
-        "INSERT INTO parcelas_vigentes (id_parcela) VALUES (1)"
+        "INSERT INTO parcelas_vigentes (id_parcela) VALUES (100)"
     )
     conn_prueba.execute(
         "INSERT INTO series_diarias_vpm (id_parcela, fecha, evi_crudo, gpp_diario) "
-        "VALUES (1, '2024-05-01', 0.4, 12.3)"
+        "VALUES (100, '2024-05-01', 0.4, 12.3)"
     )
     conn_prueba.commit()
 
@@ -22,7 +22,7 @@ def test_upsert_no_borra_gpp_existente(conn_prueba):
 
     fila = conn_prueba.execute(
         "SELECT evi_crudo, gpp_diario FROM series_diarias_vpm "
-        "WHERE id_parcela=1 AND fecha='2024-05-01'"
+        "WHERE id_parcela=100 AND fecha='2024-05-01'"
     ).fetchone()
 
     # evi_crudo NO debe sobrescribirse (ya tenía valor real: 0.4, no 0.45)

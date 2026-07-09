@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import numpy as np
 import pandas as pd
-from utils.conexionDB import get_connection_raw
 
 from utils.aplicar_whittaker import aplicar_whittaker_series
 
@@ -128,6 +127,7 @@ def guardar_indices_suavizados(
         Número de filas escritas (0 si no hay datos válidos).
     """
     from contextlib import closing
+    from utils.conexionDB import get_connection_raw
 
     col = f"id_{id_parcela}"
     df_evi  = dfs_vpm.get("EVI")

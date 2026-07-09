@@ -223,27 +223,6 @@ def seeding(rutaGJSON: str) -> None:
                     CHECK (dia_anio BETWEEN 1 AND 366)
                 );
             """)
-            # Migración: reparar columnas anio_min_incluido/anio_max_incluido
-            # que pudieron quedar como BLOB (numpy.int64 → sqlite3 los
-            # serializa como binario little-endian de 4 u 8 bytes).
-            filas_a_reparar = conn.execute("""
-                SELECT rowid, id_region, variable, dia_anio,
-                       anio_min_incluido, anio_max_incluido
-                FROM climatologia_diaria
-                WHERE typeof(anio_min_incluido) = 'blob'
-                   OR typeof(anio_max_incluido) = 'blob'
-            """).fetchall()
-            for row in filas_a_reparar:
-                rowid = row[0]
-                anio_min = int.from_bytes(row[4], 'little', signed=False) if isinstance(row[4], bytes) else row[4]
-                anio_max = int.from_bytes(row[5], 'little', signed=False) if isinstance(row[5], bytes) else row[5]
-                conn.execute("""
-                    UPDATE climatologia_diaria
-                    SET anio_min_incluido = ?, anio_max_incluido = ?
-                    WHERE rowid = ?
-                """, (int(anio_min), int(anio_max), rowid))
-            if filas_a_reparar:
-                print(f"  Migración climatología: {len(filas_a_reparar)} fila(s) reparada(s).")
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS series_extrapoladas_ventana (
                     id_prediccion    INTEGER NOT NULL,
