@@ -601,7 +601,8 @@ from utils.conexionDB import get_connection_raw
 def _cargar_ciclo(id_ciclo: int) -> dict | None:
     sql = """
         SELECT id_ciclo, id_parcela, temporada, lswi_max,
-               sos, t1, t2, t3, eos, estado_ciclo
+               sos, t1, t2, t3, eos, estado_ciclo,
+               fecha_inicio, fecha_fin
         FROM produccion_acumulada_ciclo
         WHERE id_ciclo = ?
     """
@@ -612,6 +613,7 @@ def _cargar_ciclo(id_ciclo: int) -> dict | None:
     cols = [
         "id_ciclo", "id_parcela", "temporada", "lswi_max",
         "sos", "t1", "t2", "t3", "eos", "estado_ciclo",
+        "fecha_inicio", "fecha_fin",
     ]
     return dict(zip(cols, row))
 
@@ -768,20 +770,97 @@ def ejecutar_prediccion_ventana(
               f"{resultado.get('yield_qq_ha', 'N/A'):.1f} qq/ha")
         if ventana == "EOS":
             with closing(get_connection_raw()) as conn:
-                conn.execute("""
-                    UPDATE produccion_acumulada_ciclo
-                    SET rendimiento = ?, produccion_total = ?
-                    WHERE id_ciclo = ?
-                """, (
-                    resultado.get("yield_qq_ha"),
-                    resultado.get("yield_qq_parcela"),
-                    id_ciclo,
-                ))
+                with conn:
+                    conn.execute("""
+                        UPDATE produccion_acumulada_ciclo
+                        SET rendimiento = ?, produccion_total = ?
+                        WHERE id_ciclo = ?
+                    """, (
+                        resultado.get("yield_qq_ha"),
+                        resultado.get("yield_qq_parcela"),
+                        id_ciclo,
+                    ))
             print(f"  [UPDATE] produccion_acumulada_ciclo: rendimiento="
                   f"{resultado.get('yield_qq_ha', 'N/A'):.1f} qq/ha, "
                   f"produccion_total={resultado.get('yield_qq_parcela', 'N/A'):.1f} qq")
 
     return resultado
+
+
+# =============================================================================
+# Recalculo en memoria — para ajuste visual de límites SOS/EOS
+# =============================================================================
+
+def recalcular_en_memoria(
+    id_ciclo: int,
+    nuevo_sos: date,
+    nuevo_eos: date,
+    lambda_param: float = 4000.0,
+) -> dict | None:
+    """
+    Ejecuta predicción EOS con SOS/EOS personalizados SIN persistir nada.
+    Usado por la vista de análisis histórico para recalcular producción
+    cuando el operador ajusta los límites del ciclo.
+
+    Parámetros
+    ----------
+    id_ciclo : int
+        Identificador del ciclo en ``produccion_acumulada_ciclo``.
+    nuevo_sos : date
+        Fecha SOS propuesta.
+    nuevo_eos : date
+        Fecha EOS propuesta.
+    lambda_param : float
+        Parámetro de suavizado Whittaker (defecto 4000.0).
+
+    Retorna
+    -------
+    dict | None
+        Mismas claves que ``ejecutar_prediccion_ventana`` (yield_qq_ha,
+        yield_qq_parcela, gpp_acumulado, etc.) o None si falla.
+    """
+    from pipeline.ingesta import cargar_indices_desde_bd
+
+    ciclo = _cargar_ciclo(id_ciclo)
+    if ciclo is None:
+        return None
+    id_parcela = ciclo["id_parcela"]
+
+    # Override SOS/EOS en memoria (sin tocar BD)
+    ciclo["sos"] = str(nuevo_sos)
+    ciclo["eos"] = str(nuevo_eos)
+
+    # Cargar índices crudos para el nuevo rango
+    try:
+        dfs_crudos = cargar_indices_desde_bd(
+            fecha_inicio=str(nuevo_sos),
+            fecha_fin=str(nuevo_eos),
+            ids_parcelas=[id_parcela],
+        )
+    except ValueError:
+        return None
+
+    if dfs_crudos is None or dfs_crudos["EVI"].empty:
+        return None
+
+    # Preprocesar
+    dfs_vpm = preprocesar_indices_vpm(dfs_crudos, lambda_param=lambda_param)
+
+    # Armar dict ciclo_ext (lo que espera el core)
+    ciclo_ext = dict(ciclo)
+    ciclo_ext["fecha_inicio"] = str(nuevo_sos)
+
+    dfs_vpm_por_parcela = {id_parcela: dfs_vpm}
+
+    # Ejecutar core SIN persistir
+    return _ejecutar_prediccion_ventana_core(
+        ciclo=ciclo_ext,
+        ventana="EOS",
+        fecha_ventana=nuevo_eos,
+        dfs_vpm_por_parcela=dfs_vpm_por_parcela,
+        fecha_hoy=nuevo_eos,
+        persistir=False,
+    )
 
 
 # =============================================================================

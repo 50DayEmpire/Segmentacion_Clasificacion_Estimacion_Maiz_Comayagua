@@ -7,7 +7,8 @@ from components.mapa_parcelas import render_mapa_parcelas
 from components.sidebar_filtros import render_filtros_historico
 from utils.queries import cargar_parcelas, cargar_ciclos_historicos, cargar_datos_series
 from components.graficas_series import _figura_series
-from config import DIAS_VENTANAS
+from config import DIAS_VENTANAS, DURACION_MAX_CICLO
+from pipeline.flujos_trabajo import recalcular_en_memoria
 from utils.conexionDB import get_connection_raw
 
 st.markdown("## 📊 Análisis Histórico")
@@ -97,12 +98,19 @@ if id_parcela_click is not None:
             id_ciclo = df_ciclos.iloc[0]["id_ciclo"]
 
         ciclo = df_ciclos[df_ciclos["id_ciclo"] == id_ciclo].iloc[0]
-        ca, cb, cc, cd, ce = st.columns(5)
+        ca, cb, cc, cd, ce, cf = st.columns(6)
         ca.metric("Ciclo", f"#{ciclo['id_ciclo']}")
         cb.metric("SOS", ciclo["sos"].strftime("%d/%m/%Y") if pd.notna(ciclo["sos"]) else "—")
         cc.metric("EOS", ciclo["eos"].strftime("%d/%m/%Y") if pd.notna(ciclo["eos"]) else "—")
-        cd.metric("Rendimiento", f"{ciclo['rendimiento']:.1f} qq/ha" if pd.notna(ciclo.get("rendimiento")) else "—")
-        ce.metric("Producción Estimada de la Parcela", f"{ciclo['producción_total']:.1f} qq" if pd.notna(ciclo.get("producción_total")) else "—")
+        cd.metric("Duración del Ciclo", f"{(ciclo['eos'] - ciclo['sos']).days} días" if pd.notna(ciclo.get("eos")) and pd.notna(ciclo.get("sos")) else "—")
+        ce.metric("Rendimiento", f"{ciclo['rendimiento']:.1f} qq/ha" if pd.notna(ciclo.get("rendimiento")) else "—")
+        cf.metric("Producción Estimada de la Parcela", f"{ciclo['produccion_total']:.1f} qq" if pd.notna(ciclo.get("produccion_total")) else "—")
+
+        if pd.notna(ciclo.get("sos")) and pd.notna(ciclo.get("eos")):
+            duracion = (ciclo["eos"] - ciclo["sos"]).days
+            if duracion > DURACION_MAX_CICLO:
+                st.warning(f"⚠️ Ciclo anormalmente largo ({duracion} días). "
+                           f"La duración máxima esperada es {DURACION_MAX_CICLO} días.")
 
         ventana = filtros["ventana"]
         with closing(get_connection_raw()) as conn:
@@ -184,6 +192,9 @@ if id_parcela_click is not None:
                     if not tramo.empty:
                         validacion[idx] = tramo
 
+            sos_ts = pd.Timestamp(sos) if pd.notna(sos) else None
+            eos_ts = pd.Timestamp(eos) if pd.notna(eos) else None
+
             fig = _figura_series(
                 f"Parcela {id_parcela_click} — Ciclo #{id_ciclo}",
                 datos_ciclo,
@@ -192,8 +203,154 @@ if id_parcela_click is not None:
                 ventana_nombre=ventana,
                 extrapolado=extrapolado,
                 validacion=validacion,
+                sos_fecha=sos_ts,
+                eos_fecha=eos_ts,
             )
-            st.plotly_chart(fig, use_container_width=True)
+
+            # ── Toggle modo ajuste ─────────────────────────────────────
+            # Debe ir antes del chart para que el dragmode se aplique
+            modo_ajuste = st.checkbox(
+                "✏️ Activar selección visual de SOS/EOS",
+                value=st.session_state.get("ajuste_modo_activo", False),
+                help="Activa la herramienta de selección en el gráfico para arrastrar un rectángulo sobre el rango deseado del ciclo.",
+            )
+            st.session_state["ajuste_modo_activo"] = modo_ajuste
+
+            if modo_ajuste:
+                fig.update_layout(dragmode="select", hovermode=False)
+                st.info(
+                    "🖱️ Arrastra un rectángulo sobre el gráfico, desde el SOS propuesto hasta el EOS propuesto. "
+                    "Luego abre el panel **✏️ Ajustar límites del ciclo** debajo del gráfico para ver las fechas seleccionadas.",
+                    icon="ℹ️",
+                )
+            else:
+                fig.update_layout(dragmode="zoom", hovermode="x unified")
+
+            evento = st.plotly_chart(fig, use_container_width=True, on_select="rerun")
+
+            # ── Panel de ajuste visual de límites SOS/EOS ─────────────────
+            # Limpiar estado si cambió el ciclo seleccionado
+            if st.session_state.get("ajuste_id_ciclo") != id_ciclo:
+                for k in list(st.session_state.keys()):
+                    if k.startswith("ajuste_"):
+                        st.session_state.pop(k, None)
+                st.session_state["ajuste_id_ciclo"] = id_ciclo
+
+            with st.expander("✏️ Ajustar límites del ciclo", expanded=modo_ajuste):
+                # Capturar selección del gráfico (desde box o desde points)
+                evento_seleccion = None
+                if evento is not None:
+                    # Streamlit >=1.36 devuelve un objeto con .selection (dict-like)
+                    evento_seleccion = getattr(evento, "selection", None) or evento.get("selection", None) if isinstance(evento, dict) else None
+                if evento_seleccion:
+                    xr = []
+                    box = evento_seleccion.get("box", evento_seleccion.get("Box", None))
+                    if box is not None:
+                        if isinstance(box, list) and len(box):
+                            xr = box[0].get("xrange", box[0].get("x", []))
+                        elif isinstance(box, dict):
+                            xr = box.get("xrange", box.get("x", []))
+                    if not xr:
+                        pts = evento_seleccion.get("points", [])
+                        if pts:
+                            xs = [p.get("x") for p in pts if p.get("x") is not None]
+                            if xs:
+                                xr = [min(xs), max(xs)]
+                    if len(xr) == 2:
+                        st.session_state["ajuste_nuevo_sos"] = pd.Timestamp(xr[0]).date()
+                        st.session_state["ajuste_nuevo_eos"] = pd.Timestamp(xr[1]).date()
+
+                sos_val = sos if hasattr(sos, "date") else sos
+                eos_val = eos if hasattr(eos, "date") else eos
+                default_sos = st.session_state.get("ajuste_nuevo_sos", sos_val)
+                default_eos = st.session_state.get("ajuste_nuevo_eos", eos_val)
+
+                col1, col2 = st.columns(2)
+                nuevo_sos = col1.date_input("SOS", value=default_sos)
+                nuevo_eos = col2.date_input("EOS", value=default_eos)
+                dias_prop = (nuevo_eos - nuevo_sos).days
+                st.caption(f"Duración propuesta: {dias_prop} días" + (" ⚠️ Anormalmente largo" if dias_prop > DURACION_MAX_CICLO else ""))
+
+                st.session_state["ajuste_nuevo_sos"] = nuevo_sos
+                st.session_state["ajuste_nuevo_eos"] = nuevo_eos
+
+                col_a, col_b, col_c = st.columns(3)
+                hay_rec = st.session_state.get("ajuste_activo", False)
+
+                if col_a.button("🔄 Recalcular", use_container_width=True):
+                    with st.spinner("Recalculando producción…"):
+                        res = recalcular_en_memoria(
+                            id_ciclo=int(id_ciclo),
+                            nuevo_sos=nuevo_sos,
+                            nuevo_eos=nuevo_eos,
+                        )
+                    if res:
+                        st.session_state["ajuste_resultado"] = res
+                        st.session_state["ajuste_activo"] = True
+                        st.rerun()
+                    else:
+                        st.error("No se pudo recalcular. Verifica que existan datos EVI/LSWI para el rango seleccionado.")
+
+                if col_b.button("💾 Guardar", use_container_width=True, disabled=not hay_rec):
+                    with closing(get_connection_raw()) as conn:
+                        with conn:
+                            conn.execute("""
+                                DELETE FROM series_extrapoladas_ventana
+                                WHERE id_prediccion IN (
+                                    SELECT id_prediccion FROM predicciones_ventana WHERE id_ciclo = ?
+                                )
+                            """, (int(id_ciclo),))
+                            conn.execute("DELETE FROM predicciones_ventana WHERE id_ciclo = ?", (int(id_ciclo),))
+                            t1 = nuevo_sos + timedelta(days=DIAS_VENTANAS["T1"])
+                            t2 = nuevo_sos + timedelta(days=DIAS_VENTANAS["T2"])
+                            t3 = nuevo_sos + timedelta(days=DIAS_VENTANAS["T3"])
+                            conn.execute("""
+                                UPDATE produccion_acumulada_ciclo
+                                SET sos = ?, eos = ?, t1 = ?, t2 = ?, t3 = ?
+                                WHERE id_ciclo = ?
+                            """, (str(nuevo_sos), str(nuevo_eos),
+                                  str(t1), str(t2), str(t3), int(id_ciclo)))
+                            r = st.session_state["ajuste_resultado"]
+                            conn.execute("""
+                                INSERT INTO predicciones_ventana
+                                    (id_ciclo, id_parcela, ventana, fecha_ventana,
+                                     lswi_max_efectivo_usado, gpp_acumulado, npp_acumulado,
+                                     rendimiento_estimado_qq_ha, rendimiento_estimado_qq_parcela,
+                                     fecha_congelamiento)
+                                VALUES (?, ?, 'EOS', ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                            """, (int(id_ciclo), int(id_parcela_click), str(nuevo_eos),
+                                  r.get("gpp_acumulado"), r.get("gpp_acumulado"),
+                                  r.get("npp_acumulado"),
+                                  r["yield_qq_ha"], r["yield_qq_parcela"]))
+                            conn.execute("""
+                                UPDATE produccion_acumulada_ciclo
+                                SET rendimiento = ?, produccion_total = ?
+                                WHERE id_ciclo = ?
+                            """, (r["yield_qq_ha"], r["yield_qq_parcela"], int(id_ciclo)))
+                    for k in list(st.session_state.keys()):
+                        if k.startswith("ajuste_"):
+                            st.session_state.pop(k, None)
+                    st.success("✅ Límites y producción guardados correctamente.")
+                    st.cache_data.clear()
+                    st.rerun()
+
+                if col_c.button("❌ Cancelar", use_container_width=True, disabled=not hay_rec):
+                    for k in list(st.session_state.keys()):
+                        if k.startswith("ajuste_"):
+                            st.session_state.pop(k, None)
+                    st.info("↩️ Cambios descartados.")
+                    st.rerun()
+
+                if hay_rec:
+                    r = st.session_state["ajuste_resultado"]
+                    orig_rend = ciclo.get("rendimiento")
+                    orig_prod = ciclo.get("produccion_total")
+                    st.markdown("##### Comparativa")
+                    ca2, cb2, cc2, cd2 = st.columns(4)
+                    ca2.metric("Rend. actual", f"{orig_rend:.1f} qq/ha" if pd.notna(orig_rend) else "—")
+                    cb2.metric("Rend. recalculado", f"{r['yield_qq_ha']:.1f} qq/ha")
+                    cc2.metric("Prod. actual", f"{orig_prod:.1f} qq" if pd.notna(orig_prod) else "—")
+                    cd2.metric("Prod. recalculada", f"{r['yield_qq_parcela']:.1f} qq")
 
     else:
         st.info(f"No hay ciclos registrados para la parcela **{id_parcela_click}** en {temporada} {anio}.")

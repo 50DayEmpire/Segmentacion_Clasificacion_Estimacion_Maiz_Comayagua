@@ -135,7 +135,8 @@ def cargar_ciclos_historicos(
     -------
     pd.DataFrame
         Columnas: id_ciclo, id_parcela, temporada, sos, t1, t2, t3, eos,
-        rendimiento, produccion_total, lswi_max, estado_ciclo.
+        rendimiento, produccion_total, lswi_max, estado_ciclo,
+        fecha_inicio, fecha_fin.
     """
     from contextlib import closing
     from utils.conexionDB import get_connection_raw
@@ -158,13 +159,15 @@ def cargar_ciclos_historicos(
     sql = f"""
         SELECT id_ciclo, id_parcela, temporada, sos,
                t1, t2, t3, eos,
-               rendimiento, produccion_total, lswi_max, estado_ciclo
+               rendimiento, produccion_total, lswi_max, estado_ciclo,
+               fecha_inicio, fecha_fin
         FROM produccion_acumulada_ciclo
         {where}
         ORDER BY sos, id_parcela
     """
     with closing(get_connection_raw()) as conn:
-        return pd.read_sql(sql, conn, params=params, parse_dates=["sos", "t1", "t2", "t3", "eos"])
+        return pd.read_sql(sql, conn, params=params,
+                           parse_dates=["sos", "t1", "t2", "t3", "eos", "fecha_inicio", "fecha_fin"])
 
 
 @st.cache_data(show_spinner="Cargando predicciones…")

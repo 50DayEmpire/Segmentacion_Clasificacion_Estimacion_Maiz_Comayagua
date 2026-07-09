@@ -262,6 +262,8 @@ def crear_ciclo_historico(
     sos_fecha: pd.Timestamp | date,
     lswi_max: float | None = None,
     eos_fecha: pd.Timestamp | date | None = None,
+    fecha_inicio: pd.Timestamp | date | None = None,
+    fecha_fin: pd.Timestamp | date | None = None,
 ) -> int:
     """
     Crea un registro histórico en ``produccion_acumulada_ciclo`` con
@@ -278,6 +280,10 @@ def crear_ciclo_historico(
     eos_fecha : pd.Timestamp | date, opcional
         Fecha real de fin de ciclo (valle segmentado). Si se omite,
         se calcula como ``sos + DIAS_VENTANAS["eos"]``.
+    fecha_inicio : pd.Timestamp | date, opcional
+        Fecha de inicio del segmento (valle anterior, inmutable).
+    fecha_fin : pd.Timestamp | date, opcional
+        Fecha de fin del segmento (valle posterior, inmutable).
 
     Retorna
     -------
@@ -292,10 +298,14 @@ def crear_ciclo_historico(
     t3 = sos + timedelta(days=DIAS_VENTANAS["T3"])
     eos = pd.Timestamp(eos_fecha).normalize() if eos_fecha is not None else sos + timedelta(days=DIAS_VENTANAS["eos"])
 
+    fi = str(pd.Timestamp(fecha_inicio).date()) if fecha_inicio is not None else None
+    ff = str(pd.Timestamp(fecha_fin).date()) if fecha_fin is not None else None
+
     sql = """
         INSERT INTO produccion_acumulada_ciclo
-            (id_parcela, temporada, lswi_max, sos, t1, t2, t3, eos, estado_ciclo)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'finalizado')
+            (id_parcela, temporada, lswi_max, sos, t1, t2, t3, eos,
+             fecha_inicio, fecha_fin, estado_ciclo)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'finalizado')
     """
     with closing(get_connection_raw()) as conn:
         with conn:
@@ -306,6 +316,8 @@ def crear_ciclo_historico(
                 str(sos.date()),
                 str(t1.date()), str(t2.date()), str(t3.date()),
                 str(eos.date()),
+                fi,
+                ff,
             ))
             return cursor.lastrowid
 

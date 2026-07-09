@@ -434,12 +434,14 @@ def _procesar_ciclo(
     logger: logging.Logger,
 ) -> tuple[int, int]:
     """Orquesta el procesamiento de un ciclo activo. Retorna (ingestadas, predicciones)."""
+    from contextlib import closing
     from pipeline.modulo_fenologico import detectar_y_persistir_sos_ciclo
     from pipeline.modulo_predictivo import (
         ejecutar_prediccion_ventana,
         existe_prediccion_ventana,
         prediccion_congelada_antes_de,
     )
+    from utils.conexionDB import get_connection_raw
 
     id_ciclo = ciclo["id_ciclo"]
     _log_seguro(
@@ -539,6 +541,18 @@ def _procesar_ciclo(
                 ventana, id_ciclo, resultado["yield_qq_ha"],
                 resultado["fecha_congelamiento"],
             )
+            if ventana == "EOS":
+                with closing(get_connection_raw()) as conn:
+                    with conn:
+                        conn.execute("""
+                            UPDATE produccion_acumulada_ciclo
+                            SET rendimiento = ?, produccion_total = ?
+                            WHERE id_ciclo = ?
+                        """, (
+                            resultado.get("yield_qq_ha"),
+                            resultado.get("yield_qq_parcela"),
+                            id_ciclo,
+                        ))
 
     return ingestadas, predicciones
 
@@ -791,8 +805,8 @@ def detectar_y_crear_ciclos_pendientes(
                 sql_insert = """
                     INSERT INTO produccion_acumulada_ciclo
                         (id_parcela, temporada, lswi_max, sos, t1, t2, t3, eos,
-                         estado_ciclo)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'candidato')
+                         fecha_inicio, fecha_fin, estado_ciclo)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'candidato')
                 """
                 with closing(get_connection_raw()) as conn:
                     with conn:
@@ -800,6 +814,7 @@ def detectar_y_crear_ciclos_pendientes(
                             id_parcela, temporada_activa, lswi_max_val, str(sos_date),
                             str(fechas_ciclo["t1"]), str(fechas_ciclo["t2"]),
                             str(fechas_ciclo["t3"]), str(eos_date),
+                            None, None,
                         ))
                         nuevo_id_ciclo = cursor.lastrowid
 

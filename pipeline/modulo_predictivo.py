@@ -440,12 +440,15 @@ def ejecutar_prediccion_ventana(
     fecha_ventana: date,
     dfs_vpm_por_parcela: dict[int, dict],
     fecha_hoy: date,
+    persistir: bool = True,
 ) -> dict | None:
     """
     Ejecuta el flujo VPM completo para una ventana T1/T2/T3 de un ciclo.
 
-    Persiste el resultado en ``predicciones_ventana`` y el tramo extrapolado
-    en ``series_extrapoladas_ventana``.
+    Si ``persistir=True`` (defecto), persiste el resultado en
+    ``predicciones_ventana`` y el tramo extrapolado en
+    ``series_extrapoladas_ventana``. Si ``persistir=False``
+    solo retorna el dict con métricas sin escribir en BD.
 
     Retorna un dict con métricas de la predicción si fue exitosa, o None.
     """
@@ -599,45 +602,48 @@ def ejecutar_prediccion_ventana(
     area_ha = _obtener_area_ha(id_parcela)
     yield_qq_parcela = yield_qq_ha * area_ha if area_ha else None
 
-    sql_ins = """
-        INSERT INTO predicciones_ventana
-            (id_ciclo, id_parcela, ventana, fecha_ventana,
-             lswi_max_efectivo_usado, gpp_acumulado, npp_acumulado,
-             rendimiento_estimado_qq_ha, rendimiento_estimado_qq_parcela,
-             fecha_congelamiento)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
-        ON CONFLICT (id_ciclo, ventana) DO NOTHING;
-    """
     id_prediccion = None
-    with closing(get_connection_raw()) as conn:
-        with conn:
-            cur = conn.execute(sql_ins, (
-                id_ciclo, id_parcela, ventana, str(fecha_ventana),
-                lswi_max_usado, gpp_acumulado, npp_acumulado,
-                yield_qq_ha, yield_qq_parcela,
-            ))
-            if cur.rowcount > 0:
-                id_prediccion = cur.lastrowid
+    if persistir:
+        sql_ins = """
+            INSERT INTO predicciones_ventana
+                (id_ciclo, id_parcela, ventana, fecha_ventana,
+                 lswi_max_efectivo_usado, gpp_acumulado, npp_acumulado,
+                 rendimiento_estimado_qq_ha, rendimiento_estimado_qq_parcela,
+                 fecha_congelamiento)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+            ON CONFLICT (id_ciclo, ventana) DO NOTHING;
+        """
+        with closing(get_connection_raw()) as conn:
+            with conn:
+                cur = conn.execute(sql_ins, (
+                    id_ciclo, id_parcela, ventana, str(fecha_ventana),
+                    lswi_max_usado, gpp_acumulado, npp_acumulado,
+                    yield_qq_ha, yield_qq_parcela,
+                ))
+                if cur.rowcount > 0:
+                    id_prediccion = cur.lastrowid
 
-    if id_prediccion is not None:
-        ult_obs_evi  = serie_evi_obs.index[-1]  if not serie_evi_obs.empty  else None
-        ult_obs_lswi = serie_lswi_obs.index[-1] if not serie_lswi_obs.empty else None
+        if id_prediccion is not None:
+            ult_obs_evi  = serie_evi_obs.index[-1]  if not serie_evi_obs.empty  else None
+            ult_obs_lswi = serie_lswi_obs.index[-1] if not serie_lswi_obs.empty else None
 
-        tramo_evi  = (
-            serie_evi_ext.loc[serie_evi_ext.index > ult_obs_evi]
-            if ult_obs_evi else None
-        )
-        tramo_lswi = (
-            serie_lswi_ext.loc[serie_lswi_ext.index > ult_obs_lswi]
-            if ult_obs_lswi else None
-        )
-        guardar_serie_extrapolada(id_prediccion, tramo_evi, tramo_lswi)
+            tramo_evi  = (
+                serie_evi_ext.loc[serie_evi_ext.index > ult_obs_evi]
+                if ult_obs_evi else None
+            )
+            tramo_lswi = (
+                serie_lswi_ext.loc[serie_lswi_ext.index > ult_obs_lswi]
+                if ult_obs_lswi else None
+            )
+            guardar_serie_extrapolada(id_prediccion, tramo_evi, tramo_lswi)
 
     return {
         "id_ciclo": id_ciclo,
         "ventana": ventana,
         "yield_qq_ha": yield_qq_ha,
         "yield_qq_parcela": yield_qq_parcela,
+        "gpp_acumulado": gpp_acumulado,
+        "npp_acumulado": npp_acumulado,
         "fecha_congelamiento": datetime.utcnow().isoformat(),
         "parcelas_ok": 1 if id_prediccion is not None else 0,
     }

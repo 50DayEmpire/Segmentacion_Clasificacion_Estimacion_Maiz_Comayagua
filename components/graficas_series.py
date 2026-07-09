@@ -51,6 +51,8 @@ def _figura_series(
     ventana_nombre: str | None = None,
     extrapolado: dict | None = None,
     validacion: dict | None = None,
+    sos_fecha: pd.Timestamp | None = None,
+    eos_fecha: pd.Timestamp | None = None,
 ) -> go.Figure:
     fig = make_subplots(
         rows=len(indices), cols=1,
@@ -129,6 +131,26 @@ def _figura_series(
                 x=ventana_fecha,
                 line=dict(color="#e74c3c", width=1.5, dash="dash"),
                 annotation_text=etiqueta,
+                annotation_position="top right",
+                annotation_font=dict(color="#e74c3c", size=10),
+                row=i, col=1,
+            )
+
+        if sos_fecha is not None:
+            fig.add_vline(
+                x=sos_fecha,
+                line=dict(color="#2ecc71", width=2, dash="dash"),
+                annotation_text=f"SOS {sos_fecha.strftime('%d/%m/%Y')}",
+                annotation_position="top left",
+                annotation_font=dict(color="#2ecc71", size=10),
+                row=i, col=1,
+            )
+
+        if eos_fecha is not None:
+            fig.add_vline(
+                x=eos_fecha,
+                line=dict(color="#e74c3c", width=2, dash="dash"),
+                annotation_text=f"EOS {eos_fecha.strftime('%d/%m/%Y')}",
                 annotation_position="top right",
                 annotation_font=dict(color="#e74c3c", size=10),
                 row=i, col=1,

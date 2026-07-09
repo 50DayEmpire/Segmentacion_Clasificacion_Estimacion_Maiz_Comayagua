@@ -34,6 +34,8 @@ FECHA_SIEMBRA_CICLOS = {
 
 DURACION_CICLO = 120 # días — duración típica de un ciclo de cultivo de maíz en Comayagua
 
+DURACION_MAX_CICLO = 160 # días — duración máxima de un ciclo de cultivo de maíz en Comayagua
+
 # ── Años disponibles para análisis histórico ────────────────────────────────────
 ANIOS_HISTORICO = [2020, 2021, 2022, 2023, 2024, 2025]
 ANIO_INICIAL_HISTORICO = 2020
