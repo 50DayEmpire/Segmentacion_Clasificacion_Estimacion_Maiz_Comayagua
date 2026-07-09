@@ -1,3 +1,4 @@
+import logging
 import numpy as np
 import pandas as pd
 from contextlib import closing
@@ -6,6 +7,8 @@ from scipy.optimize import curve_fit
 
 from config import DURACION_CICLO
 from utils.conexionDB import get_connection_raw
+
+_log_pred = logging.getLogger("seed_historico_offline")
 
 
 def _doble_logistica(t, vmin, vmax, S, mS, A, mA):
@@ -131,9 +134,14 @@ def extender_serie_con_curva_parametrica(
           recomienda persistir este dict junto a la predicción, para
           auditoría de qué tan confiable fue la extrapolación usada.
     """
+    n_obs = len(serie_suavizada)
     params = ajustar_curva_doble_logistica(serie_suavizada, fecha_sos)
 
     if params is None or params["r2"] < r2_minimo_aceptable:
+        _log_pred.warning(
+            "[CURVA] NO se extiende — n_obs=%d R²=%s (None si falló ajuste)",
+            n_obs, params["r2"] if params else "None",
+        )
         return serie_suavizada.copy(), None
 
     ultima_fecha_observada = serie_suavizada.index[-1]
@@ -141,6 +149,14 @@ def extender_serie_con_curva_parametrica(
         ultima_fecha_observada + pd.Timedelta(days=1),
         fecha_fin_extension,
         freq="D",
+    )
+
+    _log_pred.debug(
+        "[CURVA] OK — n_obs=%d R²=%.4f vmin=%.3f vmax=%.3f S=%.1f mS=%.4f A=%.1f mA=%.4f "
+        "ult_obs=%s ext_hasta=%s (%d días futuros)",
+        n_obs, params["r2"], params["vmin"], params["vmax"],
+        params["S"], params["mS"], params["A"], params["mA"],
+        ultima_fecha_observada.date(), fecha_fin_extension.date(), len(fechas_futuras),
     )
 
     if len(fechas_futuras) == 0:
@@ -335,7 +351,7 @@ def guardar_climatologia_diaria(
         Número de filas escritas (2 x 366, una por variable y día).
     """
     filas = []
-    for variable, serie in (("PAR", climatologia_par), ("temperatura", climatologia_temperatura)):
+    for variable, serie in (("radiacion", climatologia_par), ("temperatura", climatologia_temperatura)):
         for dia_anio, valor in serie.items():
             filas.append((id_region, variable, int(dia_anio), float(valor),
                           int(anio_min_incluido), int(anio_max_incluido)))
@@ -460,7 +476,7 @@ def ejecutar_prediccion_ventana(
     else:
         eos_ts = sos_ts + timedelta(days=DURACION_CICLO)
 
-    clim_par  = obtener_climatologia("PAR")
+    clim_rad = obtener_climatologia("radiacion")
     clim_temp = obtener_climatologia("temperatura")
 
     dfs_vpm = dfs_vpm_por_parcela.get(id_parcela)
@@ -476,6 +492,16 @@ def ejecutar_prediccion_ventana(
     serie_lswi_obs = (
         dfs_vpm["LSWI"][col].dropna()
         if col in dfs_vpm["LSWI"].columns else pd.Series(dtype=float)
+    )
+
+    _log_pred.debug(
+        "[VPM] ciclo=%d parcela=%d ventana=%s fecha_ventana=%s sos=%s eos=%s "
+        "obs_evi=%d días ult_evi=%s obs_lswi=%d días fecha_hoy=%s",
+        id_ciclo, id_parcela, ventana, fecha_ventana, sos_ts.date(), eos_ts.date(),
+        len(serie_evi_obs),
+        serie_evi_obs.index[-1].date() if not serie_evi_obs.empty else "N/A",
+        len(serie_lswi_obs),
+        fecha_hoy,
     )
 
     if ventana == "EOS":
@@ -504,6 +530,16 @@ def ejecutar_prediccion_ventana(
         "W_scalar": df_w_scalar,
     }
 
+    _log_pred.debug(
+        "[VPM_IN] ciclo=%d ventana=%s evi_obs=%d evi_ext=%d lswi_ext=%d "
+        "lswi_max_usado=%.3f W_scalar_medio=%.3f W_scalar_max=%.3f",
+        id_ciclo, ventana,
+        len(serie_evi_obs), len(serie_evi_ext), len(serie_lswi_ext),
+        lswi_max_usado if lswi_max_usado else 0,
+        df_w_scalar[col].mean() if col in df_w_scalar.columns else 0,
+        df_w_scalar[col].max() if col in df_w_scalar.columns else 0,
+    )
+
     try:
         dfs_clima = cargar_clima_desde_bd(
             fecha_inicio=fecha_inicio_str,
@@ -522,16 +558,37 @@ def ejecutar_prediccion_ventana(
         pd.Timestamp(fecha_inicio_str), eos_ts, serie_temp_real, clim_temp,
     ).reindex(fechas_ext)
     serie_rad_completa = construir_serie_climatica_prediccion(
-        pd.Timestamp(fecha_inicio_str), eos_ts, serie_rad_real, clim_par,
+        pd.Timestamp(fecha_inicio_str), eos_ts, serie_rad_real, clim_rad,
     ).reindex(fechas_ext)
 
     dfs_clima_ext = {
         "temperature-mean":     pd.DataFrame({col: serie_temp_completa}),
-        "solar-radiation-flux": pd.DataFrame({col: serie_rad_completa * 1e6}),
+        "solar-radiation-flux": pd.DataFrame({col: serie_rad_completa}),
     }
+
+    _log_pred.debug(
+        "[CLIMA] ciclo=%d ventana=%s temp_real=%d días rad_real=%d días "
+        "clima_ext desde=%s hasta=%s",
+        id_ciclo, ventana,
+        len(serie_temp_real), len(serie_rad_real),
+        serie_temp_completa.index.min().date() if not serie_temp_completa.empty else "N/A",
+        serie_temp_completa.index.max().date() if not serie_temp_completa.empty else "N/A",
+    )
 
     dfs_gpp = calcular_gpp_vpm(dfs_vegetacion=dfs_veg_ext, dfs_clima=dfs_clima_ext)
     df_gpp_recortado = dfs_gpp["GPP"].loc[sos_ts:eos_ts]
+
+    _log_pred.debug(
+        "[GPP] ciclo=%d ventana=%s GPP_medio=%.3f GPP_max=%.3f GPP_sum=%.1f "
+        "dias_gpp=%d rango=%s a %s",
+        id_ciclo, ventana,
+        dfs_gpp["GPP"][col].mean(), dfs_gpp["GPP"][col].max(),
+        dfs_gpp["GPP"][col].sum(),
+        len(df_gpp_recortado),
+        df_gpp_recortado.index.min().date() if not df_gpp_recortado.empty else "N/A",
+        df_gpp_recortado.index.max().date() if not df_gpp_recortado.empty else "N/A",
+    )
+
     resultado_rend   = calcular_biomasa_y_rendimiento(df_gpp_recortado)
 
     yield_tha       = float(resultado_rend["yield_final_tha"].iloc[0])

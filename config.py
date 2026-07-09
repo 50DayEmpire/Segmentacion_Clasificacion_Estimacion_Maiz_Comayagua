@@ -45,7 +45,6 @@ DIAS_VENTANAS = {
     "T1":  30,  # días desde el inicio de temporada (SOS)
     "T2":  60,  # días desde el inicio de temporada (SOS)
     "T3":  90,  # días desde el inicio de temporada (SOS)
-    "eos": 120, # días desde el inicio de temporada (SOS) — EOS date
     "EOS": 120, # ventana de predicción EOS
 }
 

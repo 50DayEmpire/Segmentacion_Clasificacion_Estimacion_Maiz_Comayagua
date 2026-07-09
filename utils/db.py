@@ -219,7 +219,6 @@ def seeding(rutaGJSON: str) -> None:
                     anio_max_incluido   INTEGER NOT NULL,
                     fecha_calculo       TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
                     PRIMARY KEY (id_region, variable, dia_anio),
-                    CHECK (variable IN ('PAR', 'temperatura')),
                     CHECK (dia_anio BETWEEN 1 AND 366)
                 );
             """)

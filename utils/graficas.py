@@ -146,7 +146,7 @@ def graficar_comparativa_whittaker(fecha_inicio, fecha_fin, indice_nombre="EVI",
 
     interact(actualizar_grafico, parcela=widgets.Dropdown(options=parcelas, value=parcelas[0], description="Parcela:"))
 
-def graficar_whittaker_sos(fecha_inicio, fecha_fin, indice_nombre="EVI", distancia_min_dias=90, prominencia_min=0.15, factor_sos=0.2):
+def graficar_whittaker_sos(fecha_inicio, fecha_fin, indice_nombre="EVI", distancia_min_dias=70, prominencia_min=0.05, factor_sos=0.2):
     """
     Genera un gráfico interactivo con Plotly que delimita los segmentos fenológicos (Rojo)
     y calcula/grafica dinámicamente el Start of Season (SOS) para cada ciclo (Verde).

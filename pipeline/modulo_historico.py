@@ -15,7 +15,10 @@ Flujo
 from __future__ import annotations
 
 import json
+import logging
+import sys
 from datetime import date, datetime
+from pathlib import Path
 
 import geopandas as gpd
 import openeo
@@ -29,6 +32,7 @@ from config import (
     LAYERS_GPKG,
     OPENEO,
     OPENEOFED,
+    DIAS_VENTANAS,
 )
 from pipeline.ingesta import obtener_indices_por_lotes, obtener_clima_por_lotes, cargar_indices_desde_bd, cargar_clima_desde_bd
 from contextlib import closing
@@ -37,6 +41,28 @@ from utils.aplicar_whittaker import aplicar_whittaker_series
 from utils.conexionDB import get_connection_raw
 from pipeline.modulo_fenologico import segmentar_ciclos, detectar_sos, crear_ciclo_historico
 from pipeline.modulo_predictivo import construir_climatologia_diaria, guardar_climatologia_diaria
+
+LOGS_DIR = Path(__file__).resolve().parent.parent / "logs"
+
+
+def _crear_logger_seed() -> logging.Logger:
+    LOGS_DIR.mkdir(parents=True, exist_ok=True)
+    nombre = "seed_historico_offline"
+    log_path = LOGS_DIR / f"{nombre}.log"
+    logger = logging.getLogger(nombre)
+    logger.setLevel(logging.DEBUG)
+    if not logger.handlers:
+        fmt = logging.Formatter(
+            "%(asctime)s [%(levelname)s] %(message)s",
+            datefmt="%Y-%m-%dT%H:%M:%S",
+        )
+        fh = logging.FileHandler(str(log_path), mode="a", encoding="utf-8")
+        fh.setFormatter(fmt)
+        logger.addHandler(fh)
+        ch = logging.StreamHandler(sys.stdout)
+        ch.setFormatter(fmt)
+        logger.addHandler(ch)
+    return logger
 
 
 # =============================================================================
@@ -72,11 +98,13 @@ def seed_lswi_max(
     lambda_param: float = 4000.0,
 ) -> int:
     """
-    Calcula el LSWI máximo por parcela a partir de los primeros 2 segmentos
-    (ciclos) detectados en la serie y persiste en ``lswi_maximo``:
-    el valor más alto de ambos como temporada ``primera`` y el otro como
-    ``postrera``.
-    Cada segmento se suaviza de forma independiente con Whittaker.
+    Calcula el LSWI máximo por parcela a partir de **todos** los segmentos
+    (ciclos) detectados.  Asigna cada segmento a su temporada
+    (``primera``/``postrera``) según el mes del punto medio del segmento
+    y persiste el máximo histórico por parcela-temporada en
+    ``lswi_maximo``.
+    Cada segmento se suaviza de forma independiente con Whittaker antes
+    de extraer su LSWI máximo.
 
     Parámetros
     ----------
@@ -93,18 +121,18 @@ def seed_lswi_max(
     int
         Número de filas insertadas en ``lswi_maximo``.
     """
+    log = _crear_logger_seed()
     filas = []
     for id_parcela, segmentos in segmentos_por_parcela.items():
         col = f"id_{id_parcela}"
         if col not in df_lswi_crudo.columns:
             continue
 
-        primeros_2 = segmentos[:2]
-        if not primeros_2:
+        if not segmentos:
             continue
 
-        maximos_por_segmento = []
-        for inicio, fin in primeros_2:
+        maximos_por_temporada: dict[str, list[float]] = {}
+        for inicio, fin in segmentos:
             raw = df_lswi_crudo.loc[inicio:fin, col].dropna()
             if raw.empty:
                 continue
@@ -120,21 +148,19 @@ def seed_lswi_max(
                 {"LSWI": diario},
                 lambda_param=lambda_param,
             )["LSWI"]
-            maximos_por_segmento.append(suave[col].max())
+            lswi_max_seg = float(suave[col].max())
 
-        if len(maximos_por_segmento) < 1:
-            continue
+            punto_medio = inicio + (fin - inicio) / 2
+            mes = punto_medio.month
+            temporada = "primera" if 4 <= mes <= 7 else "postrera"
+            maximos_por_temporada.setdefault(temporada, []).append(lswi_max_seg)
 
-        maximos_por_segmento.sort(reverse=True)
-        primera = maximos_por_segmento[0]
-        postrera = maximos_por_segmento[1] if len(maximos_por_segmento) > 1 else None
-
-        filas.append((id_parcela, float(primera), "primera"))
-        if postrera is not None:
-            filas.append((id_parcela, float(postrera), "postrera"))
+        for temporada, valores in maximos_por_temporada.items():
+            max_global = max(valores)
+            filas.append((id_parcela, max_global, temporada))
 
     if not filas:
-        print("    [WARN]   No se pudieron calcular valores de LSWI máximo.")
+        log.warning("[WAVE] No se pudieron calcular valores de LSWI máximo.")
         return 0
 
     sql = """
@@ -147,7 +173,7 @@ def seed_lswi_max(
         with conn:
             conn.executemany(sql, filas)
 
-    print(f"    → LSWI máximo persistido para {len(filas)} parcela(s)-temporada(s).")
+    log.info("    → LSWI máximo persistido para %d parcela(s)-temporada(s).", len(filas))
     return len(filas)
 
 
@@ -281,21 +307,21 @@ def seed_series_historicas(
     print(f"    → Radiación: {dfs_clima['solar-radiation-flux'].shape[0]} fechas")
 
     # ── 5. Climatología ──────────────────────────────────────────────────
-    print(f"\n[CHART]  Calculando y persistiendo climatología (PAR + temperatura)...")
+    print(f"\n[CHART]  Calculando y persistiendo climatología...")
 
     df_temp = dfs_clima["temperature-mean"]
     df_ssrd = dfs_clima["solar-radiation-flux"]
 
     serie_temp = df_temp.iloc[:, 0].dropna()
-    serie_par = (df_ssrd.iloc[:, 0] / 1e6 * 0.45).dropna()
+    serie_rad = df_ssrd.iloc[:, 0].dropna()
 
     clima_temp = construir_climatologia_diaria(serie_temp)
-    clima_par = construir_climatologia_diaria(serie_par)
+    clima_rad = construir_climatologia_diaria(serie_rad)
 
     anio_min = serie_temp.index.year.min()
     anio_max = serie_temp.index.year.max()
 
-    guardar_climatologia_diaria(clima_par, clima_temp, anio_min, anio_max)
+    guardar_climatologia_diaria(clima_rad, clima_temp, anio_min, anio_max)
     print(f"    → Climatología persistida (años {anio_min}-{anio_max}).")
 
     # ── 6. Suavizado Whittaker directo sobre EVI ──────────────────────────
@@ -346,8 +372,8 @@ def seed_series_historicas(
     print(f"    → {n_con_segmentos} parcela(s) con segmentos detectados "
           f"({total_segmentos} ciclos en total).")
 
-    # ── 9. LSWI máximo histórico ──────────────────────────────────────────
-    print(f"\n[WAVE]  Calculando LSWI máximo desde los primeros 2 segmentos...")
+    # ── 9. LSWI máximo histórico (todos los segmentos) ────────────────────
+    print(f"\n[WAVE]  Calculando LSWI máximo desde TODOS los segmentos...")
     seed_lswi_max(
         dfs_indices["LSWI"],
         segmentos_por_parcela,
@@ -390,10 +416,12 @@ def seed_series_historicas(
                     sos_fecha=sos_fecha,
                 )
                 ciclos_creados += 1
+                eos_fecha_calc = sos_fecha + pd.Timedelta(days=DIAS_VENTANAS["eos"])
                 ciclos_creados_info.append({
                     "id_ciclo": id_ciclo,
                     "id_parcela": id_parcela,
                     "sos_fecha": sos_fecha,
+                    "eos_fecha": eos_fecha_calc,
                 })
 
         if lista_resultados:
@@ -414,7 +442,10 @@ def seed_series_historicas(
         predicciones_ok = 0
         for cinfo in ciclos_creados_info:
             for ventana in VENTANAS:
-                fecha_ventana = cinfo["sos_fecha"] + pd.Timedelta(days=_DV[ventana])
+                if ventana == "EOS":
+                    fecha_ventana = cinfo["eos_fecha"]
+                else:
+                    fecha_ventana = cinfo["sos_fecha"] + pd.Timedelta(days=_DV[ventana])
                 if fecha_ventana.date() > hoy:
                     continue
                 res = ejecutar_prediccion_ventana(
@@ -474,15 +505,16 @@ def seed_historico_offline(
     -------
     dict con las mismas claves que ``seed_series_historicas``.
     """
+    log = _crear_logger_seed()
     if fecha_fin is None:
         fecha_fin = date.today().isoformat()
     if fecha_inicio is None:
         fecha_inicio = f"{ANIO_INICIAL_HISTORICO}-01-01"
 
-    print(f"[OFFLINE] Rango: [{fecha_inicio} → {fecha_fin}]", flush=True)
+    log.info("[OFFLINE] Rango: [%s → %s]", fecha_inicio, fecha_fin)
 
     # ── 1. Eliminar cálculos anteriores (replace) ─────────────────────────
-    print("[CLEAN] Eliminando cálculos previos...", flush=True)
+    log.info("[CLEAN] Eliminando cálculos previos...")
     tablas_orden = [
         "series_extrapoladas_ventana",
         "predicciones_ventana",
@@ -495,41 +527,41 @@ def seed_historico_offline(
         with conn:
             for tabla in tablas_orden:
                 n = conn.execute(f"DELETE FROM {tabla}").rowcount
-                print(f"    → {tabla}: {n} fila(s) eliminada(s).", flush=True)
+                log.info("    → %s: %d fila(s) eliminada(s).", tabla, n)
 
     # ── 2. Cargar índices crudos desde BD ────────────────────────────────
-    print(f"\n[SAT] Cargando índices desde BD...", flush=True)
+    log.info("[SAT] Cargando índices desde BD...")
     dfs_indices = cargar_indices_desde_bd(fecha_inicio, fecha_fin)
-    print(f"    → EVI: {dfs_indices['EVI'].shape[0]} fechas, "
-          f"{dfs_indices['EVI'].shape[1]} parcelas", flush=True)
-    print(f"    → LSWI: {dfs_indices['LSWI'].shape[0]} fechas, "
-          f"{dfs_indices['LSWI'].shape[1]} parcelas", flush=True)
+    log.info("    → EVI: %d fechas, %d parcelas",
+             dfs_indices['EVI'].shape[0], dfs_indices['EVI'].shape[1])
+    log.info("    → LSWI: %d fechas, %d parcelas",
+             dfs_indices['LSWI'].shape[0], dfs_indices['LSWI'].shape[1])
 
     # ── 3. Cargar datos climáticos desde BD ──────────────────────────────
-    print(f"\n[CLIMA] Cargando datos climáticos desde BD...", flush=True)
+    log.info("[CLIMA] Cargando datos climáticos desde BD...")
     dfs_clima = cargar_clima_desde_bd(fecha_inicio, fecha_fin)
-    print(f"    → Temperatura: {dfs_clima['temperature-mean'].shape[0]} fechas", flush=True)
-    print(f"    → Radiación: {dfs_clima['solar-radiation-flux'].shape[0]} fechas", flush=True)
+    log.info("    → Temperatura: %d fechas", dfs_clima['temperature-mean'].shape[0])
+    log.info("    → Radiación: %d fechas", dfs_clima['solar-radiation-flux'].shape[0])
 
     # ── 4. Climatología ──────────────────────────────────────────────────
-    print(f"\n[CHART] Calculando y persistiendo climatología...", flush=True)
+    log.info("[CHART] Calculando y persistiendo climatología...")
     df_temp = dfs_clima["temperature-mean"]
     df_ssrd = dfs_clima["solar-radiation-flux"]
 
     serie_temp = df_temp.iloc[:, 0].dropna()
-    serie_par = (df_ssrd.iloc[:, 0] / 1e6 * 0.45).dropna()
+    serie_rad = df_ssrd.iloc[:, 0].dropna()
 
     clima_temp = construir_climatologia_diaria(serie_temp)
-    clima_par = construir_climatologia_diaria(serie_par)
+    clima_rad = construir_climatologia_diaria(serie_rad)
 
     anio_min = serie_temp.index.year.min()
     anio_max = serie_temp.index.year.max()
 
-    guardar_climatologia_diaria(clima_par, clima_temp, anio_min, anio_max)
-    print(f"    → Climatología persistida (años {anio_min}-{anio_max}).", flush=True)
+    guardar_climatologia_diaria(clima_rad, clima_temp, anio_min, anio_max)
+    log.info("    → Climatología persistida (años %d-%d).", anio_min, anio_max)
 
     # ── 5. Suavizado Whittaker sobre EVI ─────────────────────────────────
-    print(f"\n[GEAR] Suavizando EVI con Whittaker-Eilers...", flush=True)
+    log.info("[GEAR] Suavizando EVI con Whittaker-Eilers...")
     df_evi = dfs_indices["EVI"].copy()
 
     df_evi = df_evi.mask((df_evi < -1.0) | (df_evi > 1.0), np.nan)
@@ -546,11 +578,11 @@ def seed_historico_offline(
         lambda_param=lambda_param,
     )
     df_evi = dfs_suavizado["EVI"]
-    print(f"    → EVI suavizado: {df_evi.shape[0]} días, "
-          f"{df_evi.shape[1]} parcelas", flush=True)
+    log.info("    → EVI suavizado: %d días, %d parcelas",
+             df_evi.shape[0], df_evi.shape[1])
 
     # ── 6. Segmentación de ciclos por parcela ────────────────────────────
-    print(f"\n[SEED] Segmentando ciclos fenológicos por parcela...", flush=True)
+    log.info("[SEED] Segmentando ciclos fenológicos por parcela...")
     segmentos_por_parcela: dict[int, list[tuple[pd.Timestamp, pd.Timestamp]]] = {}
 
     for col in df_evi.columns:
@@ -572,11 +604,14 @@ def seed_historico_offline(
 
     n_con_segmentos = len(segmentos_por_parcela)
     total_segmentos = sum(len(v) for v in segmentos_por_parcela.values())
-    print(f"    → {n_con_segmentos} parcela(s) con segmentos detectados "
-          f"({total_segmentos} ciclos en total).", flush=True)
+    log.info("    → %d parcela(s) con segmentos detectados (%d ciclos en total).",
+             n_con_segmentos, total_segmentos)
+    for idp, segs in segmentos_por_parcela.items():
+        log.debug("    segmentos parcela %d: %s", idp,
+                  [(str(s[0].date()), str(s[1].date())) for s in segs])
 
     # ── 7. LSWI máximo histórico ─────────────────────────────────────────
-    print(f"\n[WAVE] Calculando LSWI máximo desde los primeros 2 segmentos...", flush=True)
+    log.info("[WAVE] Calculando LSWI máximo desde TODOS los segmentos...")
     seed_lswi_max(
         dfs_indices["LSWI"],
         segmentos_por_parcela,
@@ -584,7 +619,7 @@ def seed_historico_offline(
     )
 
     # ── 8. Detección de SOS por segmento y persistencia ───────────────────
-    print(f"\n[SEED] Detectando SOS en cada segmento...", flush=True)
+    log.info("[SEED] Detectando SOS en cada segmento...")
     sos_por_segmento: dict[int, list[dict]] = {}
     sos_detectados = 0
     ciclos_creados = 0
@@ -624,14 +659,19 @@ def seed_historico_offline(
                     "id_ciclo": id_ciclo,
                     "id_parcela": id_parcela,
                     "sos_fecha": sos_fecha,
+                    "eos_fecha": fin,
+                    "segmento_inicio": inicio,
+                    "segmento_fin": fin,
                 })
+                log.info("    [CICLO] parcela=%d id_ciclo=%d sos=%s eos=%s",
+                         id_parcela, id_ciclo, sos_fecha.date(), fin.date())
 
         if lista_resultados:
             sos_por_segmento[id_parcela] = lista_resultados
 
-    print(f"    → SOS detectado en {sos_detectados}/{total_segmentos} segmentos "
-          f"({len(sos_por_segmento)} parcelas).", flush=True)
-    print(f"    → {ciclos_creados} ciclo(s) histórico(s) creado(s) en BD.", flush=True)
+    log.info("    → SOS detectado en %d/%d segmentos (%d parcelas).",
+             sos_detectados, total_segmentos, len(sos_por_segmento))
+    log.info("    → %d ciclo(s) histórico(s) creado(s) en BD.", ciclos_creados)
 
     # ── 9. Predicciones por ventana para cada ciclo histórico ─────────────
     if ciclos_creados_info:
@@ -639,25 +679,34 @@ def seed_historico_offline(
         from config import VENTANAS, DIAS_VENTANAS as _DV
         from pipeline.flujos_trabajo import ejecutar_prediccion_ventana
 
-        hoy = _date.today()
-        print(f"\n[PRED] Generando predicciones para {len(ciclos_creados_info)} ciclo(s)...", flush=True)
+        log.info("[PRED] Generando predicciones para %d ciclo(s)...", len(ciclos_creados_info))
         predicciones_ok = 0
         for cinfo in ciclos_creados_info:
             for ventana in VENTANAS:
-                fecha_ventana = cinfo["sos_fecha"] + pd.Timedelta(days=_DV[ventana])
-                if fecha_ventana.date() > hoy:
+                if ventana == "EOS":
+                    fecha_ventana = cinfo["eos_fecha"]
+                else:
+                    fecha_ventana = cinfo["sos_fecha"] + pd.Timedelta(days=_DV[ventana])
+                if fecha_ventana.date() > _date.today():
                     continue
+                log.debug("    [PRED] ciclo=%d parcela=%d ventana=%s fecha_ventana=%s eos=%s",
+                          cinfo["id_ciclo"], cinfo["id_parcela"], ventana,
+                          fecha_ventana.date(), cinfo["eos_fecha"].date())
                 res = ejecutar_prediccion_ventana(
                     id_ciclo=cinfo["id_ciclo"],
                     ventana=ventana,
-                    fecha_hoy=hoy,
+                    fecha_hoy=fecha_ventana.date(),
                     lambda_param=lambda_param,
                 )
                 if res is not None:
                     predicciones_ok += 1
-        print(f"    → {predicciones_ok} prediccion(es) generada(s) exitosamente.", flush=True)
+                    log.info("      [OK] yield_qq_ha=%.1f gpp_acum=%.1f",
+                             res.get("yield_qq_ha", 0), res.get("gpp_acumulado", 0))
+                else:
+                    log.warning("      [FAIL] prediccion_ventana retornó None")
+        log.info("    → %d prediccion(es) generada(s) exitosamente.", predicciones_ok)
     else:
-        print(f"\n[PRED] Sin ciclos creados, se omite generación de predicciones.", flush=True)
+        log.info("[PRED] Sin ciclos creados, se omite generación de predicciones.")
 
     return {
         "indices_crudos": dfs_indices,

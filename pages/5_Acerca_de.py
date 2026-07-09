@@ -26,7 +26,7 @@ with col_izq:
     st.markdown("### Acerca del sistema")
     st.markdown(
         """
-        Este observatorio es la capa de visualización del pipeline de estimación
+        Este observatorio es la capa de visualización del sistema de estimación
         temprana de rendimiento de maíz desarrollado como parte de la tesis:
 
         > *"Análisis prospectivo de la producción agrícola en Honduras mediante el
@@ -34,7 +34,7 @@ with col_izq:
 
         El pipeline integra tres etapas:
 
-        - **Segmentación** de parcelas agrícolas con SAMGeo
+        - **Segmentación** de parcelas agrícolas con Delineate-Anything
         - **Clasificación** de cultivos con Random Forest sobre índices espectrales tempranos
         - **Estimación** de rendimiento mediante el modelo VPM *(Vegetation Photosynthesis Model)*
 
@@ -56,7 +56,7 @@ with col_der:
                             text-transform:uppercase; letter-spacing:.05em;'>
                     Primera
                 </div>
-                <div style='font-size:1.1rem; margin-top:.25rem;'>Mayo — Octubre</div>
+                <div style='font-size:1.1rem; margin-top:.25rem;'>Abril — Julio</div>
                 <div style='color:#95a5a6; font-size:0.8rem; margin-top:.25rem;'>
                     Ciclo principal
                 </div>
@@ -73,7 +73,7 @@ with col_der:
                             text-transform:uppercase; letter-spacing:.05em;'>
                     Postrera
                 </div>
-                <div style='font-size:1.1rem; margin-top:.25rem;'>Agosto — Enero</div>
+                <div style='font-size:1.1rem; margin-top:.25rem;'>Agosto — Marzo</div>
                 <div style='color:#95a5a6; font-size:0.8rem; margin-top:.25rem;'>
                     Ciclo secundario
                 </div>

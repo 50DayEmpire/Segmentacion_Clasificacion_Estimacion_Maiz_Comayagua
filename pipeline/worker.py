@@ -482,7 +482,7 @@ def _procesar_ciclo(
         )
 
     predicciones = 0
-    for ventana in ("T1", "T2", "T3"):
+    for ventana in ("T1", "T2", "T3", "EOS"):
         fecha_ventana_str = ciclo.get(ventana.lower())
         if fecha_ventana_str is None:
             continue

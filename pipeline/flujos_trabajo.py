@@ -179,6 +179,7 @@ def _calcular_fenologia_y_rendimiento(
 
     tabla_sos = pd.DataFrame(registros_fenologia).set_index("parcela")
     print(f"   ✔️ SOS detectado para {tabla_sos['sos_fecha'].notna().sum()} / {len(tabla_sos)} parcelas.")
+    print(tabla_sos)
 
     # ── 2. Recortar GPP al período vegetativo diferenciado por parcela ────────
     print("\n✂️  Recortando GPP al período vegetativo de cada parcela...")
