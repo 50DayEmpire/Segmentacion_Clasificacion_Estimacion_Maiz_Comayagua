@@ -27,9 +27,18 @@ def _doble_logistica(t, vmin, vmax, S, mS, A, mA):
     )
 
 
+def _doble_logistica_t1(t, vmin, vmax, S, mS):
+    A_fijo = DURACION_CICLO * 0.7
+    return vmin + (vmax - vmin) * (
+        1 / (1 + np.exp(-mS * (t - S))) + 1 / (1 + np.exp(mS * (t - A_fijo))) - 1
+    )
+
+
 def ajustar_curva_doble_logistica(
     serie_suavizada: pd.Series,
     fecha_sos: pd.Timestamp,
+    duracion_ciclo_dias: int | None = None,
+    ventana: str = "T3",
 ) -> dict | None:
     """
     Ajusta una curva doble logística sobre la porción observada de una serie
@@ -45,6 +54,14 @@ def ajustar_curva_doble_logistica(
         observación disponible.
     fecha_sos : pd.Timestamp
         Fecha de SOS detectada para este ciclo (ancla del eje t=0).
+    duracion_ciclo_dias : int | None
+        Duración total esperada del ciclo (SOS a EOS) en días. Si se
+        proporciona, se usa para acotar los parámetros S y A a la escala
+        fenológica real; si es None, se usan cotas basadas en el último
+        día observado (fallback para compatibilidad).
+    ventana : str
+        Ventana de predicción (T1, T2, T3). T1 usa parámetros congelados
+        (vmax y A fijos, mA=mS) para estabilizar el ajuste con pocos datos.
 
     Retorna
     -------
@@ -58,41 +75,55 @@ def ajustar_curva_doble_logistica(
     valores = serie_suavizada.to_numpy(dtype=float)
 
     if len(dias) < 6:
-        # Muy pocos puntos para 6 parámetros libres; el ajuste no sería confiable.
         return None
 
     vmin_inicial = np.percentile(valores, 5)
-    vmax_inicial = np.percentile(valores, 95)
     ultimo_dia = dias[-1]
 
-    p0 = [
-        vmin_inicial,           # vmin
-        vmax_inicial,           # vmax
-        ultimo_dia * 0.3,       # S: inflexión de subida, estimada temprano en la serie
-        0.1,                    # mS
-        ultimo_dia * 0.8,       # A: inflexión de bajada, estimada tarde en la serie
-        0.1,                    # mA
-    ]
+    if ventana == "T1":
+        max_obs = float(valores.max())
+        p0 = [vmin_inicial, max_obs * 1.15, DURACION_CICLO * 0.2, 0.1]
+        limites_inf = [-1,       max_obs,    0,           0.001]
+        limites_sup = [ 1,  max_obs * 1.3,  36,          2    ]
+        modelo = _doble_logistica_t1
+    else:
+        vmax_inicial = np.percentile(valores, 95)
+        ref_ciclo = duracion_ciclo_dias if duracion_ciclo_dias else ultimo_dia
 
-    limites_inferiores = [-1, -1, 0, 0.001, 0, 0.001]
-    limites_superiores = [1, 1, ultimo_dia * 3, 2, ultimo_dia * 3, 2]
+        p0 = [
+            vmin_inicial, vmax_inicial,
+            ref_ciclo * 0.2, 0.1,
+            ref_ciclo * 0.7, 0.15,
+        ]
+        s_sup = min(ultimo_dia, ref_ciclo / 2) if duracion_ciclo_dias else ultimo_dia * 3
+        a_sup = int(ref_ciclo * 1.1) if duracion_ciclo_dias else ultimo_dia * 3
+        limites_inf = [-1, -1, 0, 0.001, 0, 0.12]
+        limites_sup = [1, 1, s_sup, 2, a_sup, 2]
+        modelo = _doble_logistica
 
     try:
         params_opt, _ = curve_fit(
-            _doble_logistica, dias, valores, p0=p0,
-            bounds=(limites_inferiores, limites_superiores),
+            modelo, dias, valores, p0=p0,
+            bounds=(limites_inf, limites_sup),
             maxfev=5000,
         )
     except (RuntimeError, ValueError):
         return None
 
-    predicho = _doble_logistica(dias, *params_opt)
+    if ventana == "T1":
+        predicho = _doble_logistica_t1(dias, *params_opt)
+        vmin_o, vmax_o, S_o, mS_o = params_opt
+        params_opt_full = [vmin_o, vmax_o, S_o, mS_o, DURACION_CICLO * 0.7, mS_o]
+    else:
+        predicho = _doble_logistica(dias, *params_opt)
+        params_opt_full = list(params_opt)
+
     ss_res = np.sum((valores - predicho) ** 2)
     ss_tot = np.sum((valores - np.mean(valores)) ** 2)
     r2 = 1 - ss_res / ss_tot if ss_tot > 0 else 0.0
 
     nombres = ["vmin", "vmax", "S", "mS", "A", "mA"]
-    resultado = dict(zip(nombres, params_opt))
+    resultado = dict(zip(nombres, params_opt_full))
     resultado["r2"] = r2
     return resultado
 
@@ -102,6 +133,7 @@ def extender_serie_con_curva_parametrica(
     fecha_sos: pd.Timestamp,
     fecha_fin_extension: pd.Timestamp,
     r2_minimo_aceptable: float = 0.7,
+    ventana: str = "T3",
 ) -> tuple[pd.Series, dict | None]:
     """
     Extiende una serie suavizada (EVI/LSWI) más allá de la última observación
@@ -121,6 +153,10 @@ def extender_serie_con_curva_parametrica(
         Umbral de bondad de ajuste. Si el R² del ajuste cae por debajo de
         este valor, se considera el ajuste no confiable y no se extiende
         (se retorna la serie observada sin cambios).
+    ventana : str
+        Ventana de predicción (T1, T2, T3). Se delega a
+        ajustar_curva_doble_logistica para aplicar estrategia de ajuste
+        diferenciada por ventana.
 
     Retorna
     -------
@@ -135,7 +171,11 @@ def extender_serie_con_curva_parametrica(
           auditoría de qué tan confiable fue la extrapolación usada.
     """
     n_obs = len(serie_suavizada)
-    params = ajustar_curva_doble_logistica(serie_suavizada, fecha_sos)
+    duracion_ciclo_dias = (fecha_fin_extension - fecha_sos).days if fecha_fin_extension else None
+    params = ajustar_curva_doble_logistica(
+        serie_suavizada, fecha_sos, duracion_ciclo_dias=duracion_ciclo_dias,
+        ventana=ventana,
+    )
 
     if params is None or params["r2"] < r2_minimo_aceptable:
         _log_pred.warning(
@@ -511,14 +551,17 @@ def ejecutar_prediccion_ventana(
         serie_evi_ext  = serie_evi_obs
         serie_lswi_ext = serie_lswi_obs
     else:
-        serie_evi_ext,  _ = extender_serie_con_curva_parametrica(serie_evi_obs,  sos_ts, eos_ts)
-        serie_lswi_ext, _ = extender_serie_con_curva_parametrica(serie_lswi_obs, sos_ts, eos_ts)
+        serie_evi_ext,  _ = extender_serie_con_curva_parametrica(serie_evi_obs,  sos_ts, eos_ts, ventana=ventana)
+        serie_lswi_ext, _ = extender_serie_con_curva_parametrica(serie_lswi_obs, sos_ts, eos_ts, ventana=ventana)
 
     df_evi_ext  = pd.DataFrame({col: serie_evi_ext})
     df_lswi_ext = pd.DataFrame({col: serie_lswi_ext})
 
     lswi_max_serie = float(serie_lswi_ext.max()) if not serie_lswi_ext.empty else None
-    lswi_max_usado = float(lswi_max) if lswi_max else lswi_max_serie
+    if lswi_max is not None and lswi_max_serie is not None:
+        lswi_max_usado = max(float(lswi_max), lswi_max_serie)
+    else:
+        lswi_max_usado = float(lswi_max) if lswi_max is not None else lswi_max_serie
 
     df_w_scalar = (
         (1.0 + df_lswi_ext) / (1.0 + lswi_max_usado)

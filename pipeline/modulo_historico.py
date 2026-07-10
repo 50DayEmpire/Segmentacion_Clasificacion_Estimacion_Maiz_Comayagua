@@ -56,7 +56,7 @@ def _crear_logger_seed() -> logging.Logger:
             "%(asctime)s [%(levelname)s] %(message)s",
             datefmt="%Y-%m-%dT%H:%M:%S",
         )
-        fh = logging.FileHandler(str(log_path), mode="a", encoding="utf-8")
+        fh = logging.FileHandler(str(log_path), mode="w", encoding="utf-8")
         fh.setFormatter(fmt)
         logger.addHandler(fh)
         ch = logging.StreamHandler(sys.stdout)
