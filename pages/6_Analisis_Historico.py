@@ -147,13 +147,51 @@ if id_parcela_click is not None:
         datos_series = cargar_datos_series(id_parcela_click)
         if datos_series is not None and pd.notna(sos) and pd.notna(eos):
             datos_ciclo = {"raw": {}, "smoothed": {}}
-            for tipo in ("raw", "smoothed"):
+            
+            # 1. Poblar y recortar las series crudas (raw)
+            for idx in ("EVI", "LSWI"):
+                serie_raw = datos_series["raw"].get(idx)
+                if serie_raw is not None and not serie_raw.empty:
+                    datos_ciclo["raw"][idx] = serie_raw.loc[sos:fecha_limite]
+                else:
+                    datos_ciclo["raw"][idx] = serie_raw
+            
+            # 2. Calcular el suavizado local en ventanas predictivas (T1, T2, T3) para replicar al backend
+            if ventana != "EOS" and datos_ciclo["raw"].get("EVI") is not None and datos_ciclo["raw"].get("LSWI") is not None:
+                from pipeline.modulo_vpm import preprocesar_indices_vpm
+                
+                col_name = f"id_{id_parcela_click}"
+                df_evi_raw_recortado = pd.DataFrame({col_name: datos_ciclo["raw"]["EVI"]})
+                df_lswi_raw_recortado = pd.DataFrame({col_name: datos_ciclo["raw"]["LSWI"]})
+                
+                dfs_crudos_recortados = {
+                    "EVI": df_evi_raw_recortado,
+                    "LSWI": df_lswi_raw_recortado,
+                }
+                
+                try:
+                    # Ejecutar el suavizado local idéntico al motor predictivo
+                    dfs_suave_recortados = preprocesar_indices_vpm(
+                        dfs_crudos_recortados
+                    )
+                    datos_ciclo["smoothed"]["EVI"] = dfs_suave_recortados["EVI"][col_name]
+                    datos_ciclo["smoothed"]["LSWI"] = dfs_suave_recortados["LSWI"][col_name]
+                except Exception:
+                    # Fallback al suavizado global recortado en caso de error
+                    for idx in ("EVI", "LSWI"):
+                        serie_smooth = datos_series["smoothed"].get(idx)
+                        if serie_smooth is not None and not serie_smooth.empty:
+                            datos_ciclo["smoothed"][idx] = serie_smooth.loc[sos:fecha_limite]
+                        else:
+                            datos_ciclo["smoothed"][idx] = serie_smooth
+            else:
+                # Ventana EOS o fallback general: usar suavizado global recortado
                 for idx in ("EVI", "LSWI"):
-                    serie = datos_series[tipo].get(idx)
-                    if serie is not None and not serie.empty:
-                        datos_ciclo[tipo][idx] = serie.loc[sos:fecha_limite]
+                    serie_smooth = datos_series["smoothed"].get(idx)
+                    if serie_smooth is not None and not serie_smooth.empty:
+                        datos_ciclo["smoothed"][idx] = serie_smooth.loc[sos:fecha_limite]
                     else:
-                        datos_ciclo[tipo][idx] = serie
+                        datos_ciclo["smoothed"][idx] = serie_smooth
 
             extrapolado = None
             if id_prediccion is not None:

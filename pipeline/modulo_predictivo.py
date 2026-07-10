@@ -3,7 +3,7 @@ import numpy as np
 import pandas as pd
 from contextlib import closing
 from datetime import date, datetime, timedelta
-from scipy.optimize import curve_fit
+from scipy.optimize import curve_fit, least_squares
 
 from config import DURACION_CICLO
 from utils.conexionDB import get_connection_raw
@@ -32,6 +32,36 @@ def _doble_logistica_t1(t, vmin, vmax, S, mS):
     return vmin + (vmax - vmin) * (
         1 / (1 + np.exp(-mS * (t - S))) + 1 / (1 + np.exp(mS * (t - A_fijo))) - 1
     )
+
+
+def _residuales_t1(params, dias, valores):
+    vmin, vmax, S, mS = params
+    predicho = _doble_logistica_t1(dias, vmin, vmax, S, mS)
+    residuales_valor = predicho - valores
+
+    n_obs = len(dias)
+    n_ancla = min(5, n_obs)
+    t_U = dias[-1]
+
+    pend_emp = np.polyfit(dias[-n_ancla:], valores[-n_ancla:], 1)[0]
+
+    h = 0.5
+    f_mas  = _doble_logistica_t1(np.array([t_U + h]), vmin, vmax, S, mS)[0]
+    f_menos = _doble_logistica_t1(np.array([t_U - h]), vmin, vmax, S, mS)[0]
+    pend_mod = (f_mas - f_menos) / (2 * h)
+
+    curv_emp = np.polyfit(dias[-n_ancla:], valores[-n_ancla:], 2)[0] * 2
+
+    f_0  = _doble_logistica_t1(np.array([t_U]),       vmin, vmax, S, mS)[0]
+    curv_mod = (f_mas - 2 * f_0 + f_menos) / (h ** 2)
+
+    peso_pendiente = n_obs * 0.5
+    peso_curvatura = 5.0
+
+    residual_pend = peso_pendiente * (pend_mod - pend_emp)
+    residual_curv = peso_curvatura * (curv_mod - curv_emp)
+
+    return np.concatenate([residuales_valor, [residual_pend], [residual_curv]])
 
 
 def ajustar_curva_doble_logistica(
@@ -82,10 +112,24 @@ def ajustar_curva_doble_logistica(
 
     if ventana == "T1":
         max_obs = float(valores.max())
-        p0 = [vmin_inicial, max_obs * 1.15, DURACION_CICLO * 0.2, 0.1]
-        limites_inf = [-1,       max_obs,    0,           0.001]
-        limites_sup = [ 1,  max_obs * 1.3,  36,          2    ]
-        modelo = _doble_logistica_t1
+        vmax_lb = max_obs
+        vmax_ub = max(max_obs * 1.3, max_obs + 0.1)
+        p0_vmax = min(max(max_obs * 1.15, vmax_lb), vmax_ub)
+        p0 = [vmin_inicial, p0_vmax, DURACION_CICLO * 0.2, 0.1]
+        limites_inf = [-1,       vmax_lb,    0,           0.001]
+        limites_sup = [ 1,        vmax_ub,  36,          2    ]
+
+        resultado = least_squares(
+            _residuales_t1, x0=p0, bounds=(limites_inf, limites_sup),
+            args=(dias, valores), max_nfev=5000,
+        )
+        if not resultado.success:
+            return None
+        params_opt = resultado.x
+
+        predicho = _doble_logistica_t1(dias, *params_opt)
+        vmin_o, vmax_o, S_o, mS_o = params_opt
+        params_opt_full = [vmin_o, vmax_o, S_o, mS_o, DURACION_CICLO * 0.7, mS_o]
     else:
         vmax_inicial = np.percentile(valores, 95)
         ref_ciclo = duracion_ciclo_dias if duracion_ciclo_dias else ultimo_dia
@@ -99,22 +143,15 @@ def ajustar_curva_doble_logistica(
         a_sup = int(ref_ciclo * 1.1) if duracion_ciclo_dias else ultimo_dia * 3
         limites_inf = [-1, -1, 0, 0.001, 0, 0.12]
         limites_sup = [1, 1, s_sup, 2, a_sup, 2]
-        modelo = _doble_logistica
 
-    try:
-        params_opt, _ = curve_fit(
-            modelo, dias, valores, p0=p0,
-            bounds=(limites_inf, limites_sup),
-            maxfev=5000,
-        )
-    except (RuntimeError, ValueError):
-        return None
+        try:
+            params_opt, _ = curve_fit(
+                _doble_logistica, dias, valores, p0=p0,
+                bounds=(limites_inf, limites_sup), maxfev=5000,
+            )
+        except (RuntimeError, ValueError):
+            return None
 
-    if ventana == "T1":
-        predicho = _doble_logistica_t1(dias, *params_opt)
-        vmin_o, vmax_o, S_o, mS_o = params_opt
-        params_opt_full = [vmin_o, vmax_o, S_o, mS_o, DURACION_CICLO * 0.7, mS_o]
-    else:
         predicho = _doble_logistica(dias, *params_opt)
         params_opt_full = list(params_opt)
 
@@ -207,6 +244,23 @@ def extender_serie_con_curva_parametrica(
         dias_futuros, params["vmin"], params["vmax"],
         params["S"], params["mS"], params["A"], params["mA"],
     )
+
+    if ventana == "T1":
+        # Constante de tiempo para el decaimiento (en días)
+        tau = 10.0
+        ultimo_dia_obs = float((ultima_fecha_observada - fecha_sos).days)
+        
+        # Evaluar el modelo doble logístico puro en el último día observado t_U
+        valor_modelo_t_U = _doble_logistica(
+            np.array([ultimo_dia_obs]), params["vmin"], params["vmax"],
+            params["S"], params["mS"], params["A"], params["mA"],
+        )[0]
+        
+        # Desfase vertical en t_U
+        offset = float(serie_suavizada.iloc[-1] - valor_modelo_t_U)
+        
+        # Aplicar el offset decay exponencial a los días futuros
+        valores_futuros = valores_futuros + offset * np.exp(-(dias_futuros - ultimo_dia_obs) / tau)
 
     serie_extrapolada = pd.Series(valores_futuros, index=fechas_futuras)
     serie_extendida = pd.concat([serie_suavizada, serie_extrapolada])
