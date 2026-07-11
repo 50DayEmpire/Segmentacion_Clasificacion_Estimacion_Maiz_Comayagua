@@ -3,14 +3,14 @@ from contextlib import closing
 from typing import Literal
 import geopandas as gpd
 import pandas as pd
-from config import GPKG_PATH
-from utils.conexionDB import get_connection_raw
+from config import GPKG_PRUEBAS_PATH
+from utils.conexionDB import get_connection_raw, get_db_path
 
 
 def actualizar_gpkg(
     data,
     mode: str,
-    gpkg_path: str = GPKG_PATH,
+    gpkg_path: str | Path | None = None,
     layer_name: str = "parcelas_vigentes",
     crs: str = "EPSG:32616",
     source_layer: str | None = None,
@@ -27,8 +27,9 @@ def actualizar_gpkg(
           Usa ``source_layer`` para seleccionar la capa de origen; si se omite
           se lee la primera capa disponible.
         - ``gpd.GeoDataFrame``: se usa tal cual.
-    gpkg_path : str
-        Ruta al GeoPackage destino.
+    gpkg_path : str | Path | None
+        Ruta al GeoPackage destino. Si es ``None`` se usa la BD activa
+        (según ``set_db_mode`` en ``conexionDB.py``).
     layer_name : str
         Nombre de la capa dentro del GeoPackage destino.
     mode : str
@@ -40,7 +41,7 @@ def actualizar_gpkg(
         Nombre de la capa de origen a leer. Si es ``None`` se usa la primera
         capa listada por fiona/pyogrio.
     """
-    ruta = Path(gpkg_path)
+    ruta = Path(gpkg_path) if gpkg_path is not None else get_db_path()
 
     # Si el archivo existe pero está vacío o corrupto (0 bytes), eliminarlo
     # para que pyogrio pueda crear uno nuevo limpio.
@@ -237,3 +238,31 @@ def seeding(rutaGJSON: str) -> None:
             """)
 
     print("Seeding completado.")
+
+
+def crear_bd_pruebas(geojson_path: str) -> None:
+    """
+    Crea el GeoPackage de pruebas (pipeline_pruebas.gpkg) a partir de un GeoJSON,
+    ejecuta seeding (escribe geometrías + crea tablas) y cambia el modo activo
+    a PRUEBAS.
+
+    Parámetros
+    ----------
+    geojson_path : str
+        Ruta al archivo GeoJSON con las parcelas.
+    """
+    r = Path(geojson_path)
+    if not r.exists():
+        print(f"  ❌  Archivo no encontrado: {r.resolve()}")
+        return
+    geojson = str(r.resolve())
+
+    if GPKG_PRUEBAS_PATH.exists():
+        GPKG_PRUEBAS_PATH.unlink()
+
+    from utils.conexionDB import set_db_mode
+
+    set_db_mode("pruebas")
+    seeding(geojson)
+    print(f"\n  ✅  BD de pruebas creada: {GPKG_PRUEBAS_PATH}")
+    print("  📁  Modo cambiado a: PRUEBAS")

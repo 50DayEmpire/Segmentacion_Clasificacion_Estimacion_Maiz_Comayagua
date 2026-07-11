@@ -24,7 +24,7 @@ ROOT = Path(__file__).resolve().parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from config import GPKG_PATH, CICLOS
+from config import GPKG_PATH, GPKG_PRUEBAS_PATH, CICLOS
 
 # ══════════════════════════════════════════════════════════════════════════════
 # Helpers de UI
@@ -80,10 +80,11 @@ def _get_conn() -> sqlite3.Connection:
     return get_connection_raw()
 
 def _cargar_geojson_parcelas() -> dict:
-    """Lee parcelas vigentes del gpkg y retorna GeoJSON dict."""
+    """Lee parcelas vigentes del gpkg activo y retorna GeoJSON dict."""
     import geopandas as gpd
     from config import LAYERS_GPKG
-    gdf = gpd.read_file(str(GPKG_PATH), layer=LAYERS_GPKG["parcelas"])
+    from utils.conexionDB import get_db_path
+    gdf = gpd.read_file(str(get_db_path()), layer=LAYERS_GPKG["parcelas"])
     gdf = gdf.to_crs("EPSG:4326")
     return json.loads(gdf.to_json())
 
@@ -180,6 +181,7 @@ def _menu_parcelas() -> None:
             "append":       "Agregar nuevas parcelas (append)",
             "delinear":     "Correr Delineate-Anything (segmentación automática)",
             "ver":          "Ver parcelas en la BD",
+            "crear_pruebas":"Crear BD de pruebas (pipeline_pruebas.gpkg)",
         })
         if key == "0":
             return
@@ -193,6 +195,8 @@ def _menu_parcelas() -> None:
             _accion_delinear()
         elif key == "ver":
             _accion_ver_parcelas()
+        elif key == "crear_pruebas":
+            _accion_crear_bd_pruebas()
 
 def _accion_seed_geojson() -> None:
     _seccion("Inicializar BD desde GeoJSON")
@@ -246,6 +250,27 @@ def _accion_delinear() -> None:
     from pipeline.modulo_parcelas import ejecutar_delineate_anything_local
     ejecutar_delineate_anything_local()
     _ok("Delineación completada.")
+    _pausar()
+
+def _accion_crear_bd_pruebas() -> None:
+    _seccion("Crear BD de pruebas")
+    geojsons = sorted(Path("data").glob("*.geojson"))
+    if not geojsons:
+        _error("No hay archivos .geojson en data/")
+        _pausar(); return
+    print("  Selecciona el GeoJSON de parcelas:\n")
+    for i, g in enumerate(geojsons, 1):
+        print(f"  [{i}] {g.name}")
+    print("  [0] Cancelar")
+    raw = input("\n  Opción: ").strip()
+    if raw == "0" or not raw.isdigit():
+        return
+    idx = int(raw) - 1
+    if idx < 0 or idx >= len(geojsons):
+        _warn("Opción inválida.")
+        _pausar(); return
+    from utils.db import crear_bd_pruebas
+    crear_bd_pruebas(str(geojsons[idx].resolve()))
     _pausar()
 
 def _accion_ver_parcelas() -> None:
@@ -1568,15 +1593,36 @@ _MENU_PRINCIPAL = {
     "diagnostico": "Diagnóstico del proyecto",
     "worker":      "Worker Diario (automatización)",
     "historico":   "Procesamiento histórico de series multianuales",
+    "modo":        "Cambiar modo BD (REAL / PRUEBAS)",
 }
 
+def _accion_cambiar_modo() -> None:
+    from utils.conexionDB import set_db_mode, get_db_path
+    actual = "PRUEBAS" if str(get_db_path()) == str(GPKG_PRUEBAS_PATH) else "REAL"
+    _seccion(f"Cambiar modo BD (actual: {actual})")
+    print("  [1] Modo REAL")
+    print("  [2] Modo PRUEBAS")
+    print("  [0] Cancelar")
+    raw = input("\n  Opción: ").strip()
+    if raw == "1":
+        set_db_mode("real")
+        _ok("Modo cambiado a REAL")
+    elif raw == "2":
+        set_db_mode("pruebas")
+        _ok("Modo cambiado a PRUEBAS")
+    _pausar()
+
+
 def main() -> None:
+    from utils.conexionDB import get_db_path
     while True:
         _clear()
         _titulo("🌽  Pipeline Maíz Comayagua — CLI")
+        modo = "PRUEBAS" if str(get_db_path()) == str(GPKG_PRUEBAS_PATH) else "REAL"
         print(textwrap.dedent(f"""
-          GeoPackage : {GPKG_PATH}
-          Python     : {sys.executable}
+          GeoPackage activo : {get_db_path()}
+          Modo              : [{modo}]
+          Python            : {sys.executable}
         """))
         key = _menu(_MENU_PRINCIPAL)
         if key == "0":
@@ -1598,6 +1644,8 @@ def main() -> None:
             _menu_worker()
         elif key == "historico":
             _menu_historico()
+        elif key == "modo":
+            _accion_cambiar_modo()
 
 
 if __name__ == "__main__":

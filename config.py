@@ -4,6 +4,7 @@ from pathlib import Path
 # ── Rutas ──────────────────────────────────────────────────────────────────────
 ROOT               = Path(__file__).parent
 GPKG_PATH          = ROOT / "data" / "pipeline.gpkg"
+GPKG_PRUEBAS_PATH   = ROOT / "data" / "pipeline_pruebas.gpkg"
 # MUNICIPIO_GEOJSON  = ROOT / "static" / "ComayaguaMunicipio.geojson"
 MUNICIPIO_GEOJSON  = ROOT / "static" / "ValleComayagua.geojson"
 

@@ -10,6 +10,7 @@ import traceback
 import pandas as pd
 import geopandas as gpd
 import streamlit as st
+from utils.conexionDB import get_db_path
 from config import GPKG_PATH, CRS_GEOGRAFICO, CRS_METRICO
 
 
@@ -22,7 +23,8 @@ def cargar_parcelas(layer: str = "parcelas_vigentes") -> gpd.GeoDataFrame:
     Imprime el traceback completo en consola para no perder errores.
     """
     try:
-        gdf = gpd.read_file(str(GPKG_PATH), layer=layer)
+        _gpkg = str(get_db_path())
+        gdf = gpd.read_file(_gpkg, layer=layer)
         epsg_metrico = int(CRS_METRICO.split(":")[1])
         if gdf.crs is None or gdf.crs.to_epsg() != epsg_metrico:
             gdf = gdf.set_crs(CRS_METRICO, allow_override=True)
@@ -48,7 +50,8 @@ def cargar_lista_parcelas() -> list[int]:
         la capa no existe o la consulta falla.
     """
     try:
-        gdf = gpd.read_file(str(GPKG_PATH), layer="parcelas_vigentes")
+        _gpkg = str(get_db_path())
+        gdf = gpd.read_file(_gpkg, layer="parcelas_vigentes")
         return sorted(gdf["id_parcela"].dropna().unique().tolist())
     except Exception:
         traceback.print_exc()

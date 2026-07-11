@@ -3,10 +3,6 @@
 venv/
 env/
 
-# ── uv ────────────────────────────────────────────────────────────────────────
-# uv.lock se versionea intencionalmente (reproducibilidad del entorno)
-# descomenta la siguiente línea solo si prefieres no versionarlo
-# uv.lock
 
 # ── Python ────────────────────────────────────────────────────────────────────
 __pycache__/
@@ -37,6 +33,7 @@ build/
 *.npy
 *.npz
 *.xml
+*.kml
 
 # ── Variables de entorno y secretos ───────────────────────────────────────────
 .env
@@ -76,3 +73,4 @@ htmlcov/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
+Planes

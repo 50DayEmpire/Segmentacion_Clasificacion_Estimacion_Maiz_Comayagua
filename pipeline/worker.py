@@ -213,8 +213,9 @@ def sincronizar_scheduler_con_config(cfg: dict[str, Any]) -> tuple[bool, str]:
 def _cargar_geojson_parcelas() -> dict:
     import geopandas as gpd
     from config import GPKG_PATH, LAYERS_GPKG
+    from utils.conexionDB import get_db_path
 
-    gdf = gpd.read_file(str(GPKG_PATH), layer=LAYERS_GPKG["parcelas"]).to_crs("EPSG:4326")
+    gdf = gpd.read_file(str(get_db_path()), layer=LAYERS_GPKG["parcelas"]).to_crs("EPSG:4326")
     return json.loads(gdf.to_json())
 
 

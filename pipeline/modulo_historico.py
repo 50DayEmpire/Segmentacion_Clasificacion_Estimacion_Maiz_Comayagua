@@ -38,7 +38,7 @@ from pipeline.ingesta import obtener_indices_por_lotes, obtener_clima_por_lotes,
 from contextlib import closing
 
 from utils.aplicar_whittaker import aplicar_whittaker_series
-from utils.conexionDB import get_connection_raw
+from utils.conexionDB import get_connection_raw, get_db_path
 from pipeline.modulo_fenologico import segmentar_ciclos, detectar_sos, crear_ciclo_historico
 from pipeline.modulo_predictivo import construir_climatologia_diaria, guardar_climatologia_diaria
 
@@ -80,9 +80,9 @@ def _conectar_fed() -> openeo.Connection:
 
 
 def _cargar_geojson_parcelas() -> dict:
-    """Carga el GeoJSON de todas las parcelas desde el GeoPackage."""
+    """Carga el GeoJSON de todas las parcelas desde el GeoPackage activo."""
     gdf = (
-        gpd.read_file(str(GPKG_PATH), layer=LAYERS_GPKG["parcelas"])
+        gpd.read_file(str(get_db_path()), layer=LAYERS_GPKG["parcelas"])
         .to_crs("EPSG:4326")
     )
     return json.loads(gdf.to_json())
