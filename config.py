@@ -32,7 +32,7 @@ FECHA_SIEMBRA_CICLOS = {
     "postrera": {"inicio": (8, 1), "fin": (3, 31)},  # agosto 1 - marzo 31
 }
 
-DURACION_CICLO = 120 # días — duración típica de un ciclo de cultivo de maíz en Comayagua
+DURACION_CICLO = 130 # días — duración típica de un ciclo de cultivo de maíz en Comayagua
 
 DURACION_MAX_CICLO = 160 # días — duración máxima de un ciclo de cultivo de maíz en Comayagua
 
@@ -47,7 +47,7 @@ DIAS_VENTANAS = {
     "T1":  30,  # días desde el inicio de temporada (SOS)
     "T2":  60,  # días desde el inicio de temporada (SOS)
     "T3":  90,  # días desde el inicio de temporada (SOS)
-    "EOS": 120, # ventana de predicción EOS
+    "EOS": DURACION_CICLO, # ventana de predicción EOS
 }
 
 # ---- Parámetros para corrección de DN y cálculo de reflectancia real -----------------

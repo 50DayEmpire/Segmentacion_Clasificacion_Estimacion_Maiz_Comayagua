@@ -709,6 +709,12 @@ def ejecutar_prediccion_ventana(
         print(f"  [SKIP] fecha_ventana ({fecha_ventana.date()}) > fecha_hoy ({fecha_hoy}).")
         return None
 
+    if ventana != "EOS":
+        eos_ciclo_str = ciclo.get("eos")
+        if eos_ciclo_str and fecha_ventana > pd.Timestamp(eos_ciclo_str):
+            print(f"  [SKIP] {ventana} ({fecha_ventana.date()}) > EOS ({eos_ciclo_str}).")
+            return None
+
     # ── 2. Verificar si ya existe ─────────────────────────────────────────
     if existe_prediccion_ventana(id_ciclo, ventana):
         print(f"  [SKIP] Predicci\u00f3n ya existe para ciclo {id_ciclo}, ventana {ventana}.")
@@ -739,9 +745,31 @@ def ejecutar_prediccion_ventana(
     n_suav = guardar_indices_suavizados(id_ciclo, id_parcela, dfs_vpm)
     print(f"        {n_suav} fila(s) escritas.")
 
-    # ── 6. Preparar datos para el motor de predicción ─────────────────────
+    # ── 6. Cargar valor del valle real (fecha_inicio de BD, anterior a SOS) ──
+    fecha_inicio_str = str(ciclo.get("fecha_inicio", ""))
+    if fecha_inicio_str and fecha_inicio_str != str(sos_ts.date()):
+        try:
+            dfs_valle = cargar_indices_desde_bd(
+                fecha_inicio=fecha_inicio_str,
+                fecha_fin=fecha_inicio_str,
+                ids_parcelas=[id_parcela],
+            )
+            col = f"id_{id_parcela}"
+            if col in dfs_valle["EVI"].columns:
+                serie = dfs_valle["EVI"][col].dropna()
+                if not serie.empty:
+                    ciclo["valor_valle_evi"] = float(serie.iloc[0])
+            if col in dfs_valle["LSWI"].columns:
+                serie = dfs_valle["LSWI"][col].dropna()
+                if not serie.empty:
+                    ciclo["valor_valle_lswi"] = float(serie.iloc[0])
+        except Exception:
+            pass
+
+    # ── 7. Preparar datos para el motor de predicción ─────────────────────
     print(f"  [4/5] Armando datos para motor VPM...")
     ciclo_ext = dict(ciclo)
+    ciclo_ext["fecha_valle"] = str(ciclo.get("fecha_inicio", ""))
     ciclo_ext["fecha_inicio"] = str(sos_ts.date())
 
     if ciclo_ext.get("lswi_max") is None:

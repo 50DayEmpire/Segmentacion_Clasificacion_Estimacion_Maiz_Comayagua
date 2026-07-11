@@ -693,6 +693,11 @@ def seed_historico_offline(
                     fecha_ventana = cinfo["sos_fecha"] + pd.Timedelta(days=_DV[ventana])
                 if fecha_ventana.date() > _date.today():
                     continue
+                if ventana != "EOS" and fecha_ventana > cinfo["eos_fecha"]:
+                    log.info("[SKIP] %s (%s) > EOS (%s) para ciclo %d",
+                             ventana, fecha_ventana.date(), cinfo["eos_fecha"].date(),
+                             cinfo["id_ciclo"])
+                    continue
                 log.debug("    [PRED] ciclo=%d parcela=%d ventana=%s fecha_ventana=%s eos=%s",
                           cinfo["id_ciclo"], cinfo["id_parcela"], ventana,
                           fecha_ventana.date(), cinfo["eos_fecha"].date())

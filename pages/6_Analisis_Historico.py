@@ -29,49 +29,76 @@ with st.sidebar:
 anio = filtros["anio"]
 temporada = filtros["ciclo"]
 
-col_mapa, col_detalle = st.columns([3, 1], gap="medium")
+mapa_filtros = {**filtros, "modo_color": "cultivo"}
+resultado = render_mapa_parcelas(mapa_filtros)
 
-with col_mapa:
-    mapa_filtros = {**filtros, "modo_color": "cultivo"}
-    resultado = render_mapa_parcelas(mapa_filtros)
+clicked = (resultado or {}).get("last_object_clicked")
+if clicked and isinstance(clicked, dict) and "id_parcela" in clicked:
+    st.session_state["historico_clicked"] = clicked
+clicked = st.session_state.get("historico_clicked")
 
-with col_detalle:
-    st.markdown("#### Detalle de parcela")
-    clicked = (resultado or {}).get("last_object_clicked")
-    if clicked and isinstance(clicked, dict) and "id_parcela" in clicked:
-        st.session_state["historico_clicked"] = clicked
-    clicked = st.session_state.get("historico_clicked")
+if clicked and isinstance(clicked, dict) and "id_parcela" in clicked:
+    props = clicked
+    pid = int(props.get("id_parcela", 0))
 
-    if clicked and isinstance(clicked, dict) and "id_parcela" in clicked:
-        props = clicked
-        for k, v in props.items():
-            if k.startswith("_"):
-                continue
+    area_ha = None
+    area_m2 = None
+    try:
+        gdf = cargar_parcelas()
+        fila = gdf[gdf["id_parcela"] == pid]
+        if not fila.empty:
+            area_ha = fila.iloc[0].get("area_ha")
+            area_m2 = fila.iloc[0].get("area_m2")
+    except Exception:
+        pass
+
+    cols_fila = []
+    ancho_pid = 1
+    ancho_area = 1 if area_ha is not None else 0
+    ancho_cultivo = 1
+    cols_fila = [ancho_pid, ancho_area, ancho_area, ancho_cultivo]
+    cols_fila = [c for c in cols_fila if c > 0]
+
+    cols = st.columns(cols_fila if cols_fila else [1])
+    idx = 0
+    with cols[idx]:
+        st.markdown(
+            f"<div style='font-size:2.2rem; font-weight:700;'>#{pid}</div>"
+            f"<div style='font-size:1rem; color:#95a5a6;'>Parcela</div>",
+            unsafe_allow_html=True,
+        )
+    idx += 1
+    if area_ha is not None:
+        with cols[idx]:
             st.markdown(
-                f"<div style='display:flex; justify-content:space-between; "
-                f"padding:.25rem 0; border-bottom:1px solid #2d3139; "
-                f"font-size:.9rem;'>"
-                f"<span style='color:#95a5a6;'>{k}</span>"
-                f"<span style='font-weight:600;'>{v}</span></div>",
+                f"<div style='font-size:2.2rem; font-weight:700; line-height:1.2;'>{area_ha:.2f}</div>"
+                f"<div style='font-size:.85rem; color:#95a5a6;'>hectáreas</div>",
                 unsafe_allow_html=True,
             )
-        conteo = sum(1 for k in props if not k.startswith("_"))
-        if conteo <= 1 and "id_parcela" in props:
-            try:
-                gdf = cargar_parcelas()
-                pid = int(props["id_parcela"])
-                fila = gdf[gdf["id_parcela"] == pid]
-                if not fila.empty:
-                    area_ha = fila.iloc[0].get("area_ha")
-                    area_m2 = fila.iloc[0].get("area_m2")
-                    if area_ha is not None:
-                        st.metric("Área (ha)", f"{area_ha:.4f}")
-                    if area_m2 is not None:
-                        st.metric("Área (m²)", f"{area_m2:.2f}")
-            except Exception:
-                pass
-    else:
-        st.info("Haz clic sobre una parcela en el mapa.", icon="👆")
+        idx += 1
+        with cols[idx]:
+            st.markdown(
+                f"<div style='font-size:2.2rem; font-weight:700; line-height:1.2;'>{area_m2:.0f}</div>"
+                f"<div style='font-size:.85rem; color:#95a5a6;'>m²</div>",
+                unsafe_allow_html=True,
+            )
+        idx += 1
+    nombre_cultivo = props.get("cultivo", props.get("Cultivo", ""))
+    if nombre_cultivo:
+        with cols[idx]:
+            st.markdown(
+                f"<div style='font-size:1.3rem; font-weight:500; padding-top:.6rem;'>{nombre_cultivo}</div>",
+                unsafe_allow_html=True,
+            )
+
+    items = [(k, v) for k, v in props.items()
+             if not k.startswith("_") and k.lower() not in ("id_parcela", "cultivo", "area_ha", "area_m2")]
+    if items:
+        cols_2 = st.columns(len(items))
+        for i, (k, v) in enumerate(items):
+            cols_2[i].metric(k, str(v))
+else:
+    st.info("Haz clic sobre una parcela en el mapa.", icon="👆")
 
 st.divider()
 
@@ -123,11 +150,43 @@ if id_parcela_click is not None:
                 ORDER BY ventana
             """, conn, params=(int(id_ciclo),), parse_dates=["fecha_ventana"])
         fila_pred = df_pred[df_pred["ventana"] == ventana]
-        st.markdown(f"#### Predicción ventana {ventana}")
         id_prediccion = None
+        sin_curva_evi = False
+        sin_curva_lswi = False
         if not fila_pred.empty:
             p = fila_pred.iloc[0]
             id_prediccion = p["id_prediccion"]
+            with closing(get_connection_raw()) as conn:
+                row = conn.execute(
+                    "SELECT COUNT(*) AS n_ext, "
+                    "SUM(CASE WHEN evi_extrapolado IS NOT NULL THEN 1 ELSE 0 END) AS n_evi, "
+                    "SUM(CASE WHEN lswi_extrapolado IS NOT NULL THEN 1 ELSE 0 END) AS n_lswi "
+                    "FROM series_extrapoladas_ventana WHERE id_prediccion = ?",
+                    (int(id_prediccion),),
+                ).fetchone()
+                n_evi = row[1] or 0
+                n_lswi = row[2] or 0
+            sin_curva_evi = n_evi == 0 and ventana != "EOS"
+            sin_curva_lswi = n_lswi == 0 and ventana != "EOS"
+
+        if sin_curva_evi or sin_curva_lswi:
+            with st.container(horizontal=True, vertical_alignment="center", gap="xxsmall"):
+                st.markdown(f"#### Predicción ventana {ventana}")
+                if sin_curva_evi:
+                    st.button(
+                        "⚠️",
+                        disabled=True,
+                        help="Producción estimada parcial, no fue posible ajustar una curva al ciclo EVI",
+                    )
+                if sin_curva_lswi:
+                    st.button(
+                        "⚠️",
+                        disabled=True,
+                        help="Sin producción estimada, no fue posible ajustar una curva al ciclo LSWI",
+                    )
+        else:
+            st.markdown(f"#### Predicción ventana {ventana}")
+        if not fila_pred.empty:
             ca, cb, cc, cd = st.columns(4)
             ca.metric("GPP acumulado", f"{p['gpp_acumulado']:.2f}" if pd.notna(p.get("gpp_acumulado")) else "—")
             cb.metric("NPP acumulado", f"{p['npp_acumulado']:.2f}" if pd.notna(p.get("npp_acumulado")) else "—")
