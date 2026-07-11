@@ -213,28 +213,16 @@ def graficar_whittaker_sos(fecha_inicio, fecha_fin, indice_nombre="EVI", distanc
                     etiquetadas_valles.add(f)
 
             # --- D.2. Recortar datos del segmento y Ejecutar detectar_sos ---
-            # Identificar si estamos procesando el último segmento de la lista
-            es_ultimo_segmento = (inicio == segmentos[-1][0] and fin == segmentos[-1][1])
-
-            if es_ultimo_segmento:
-                # Si es el último, extendemos la máscara hasta el fin absoluto de la serie 
-                # para que detectar_sos tenga todo el contexto de la curva actual
-                mask_segmento = (df_suave.index >= inicio)
-            else:
-                # Para los segmentos intermedios pasados, usamos los límites normales entre valles
-                mask_segmento = (df_suave.index >= inicio) & (df_suave.index <= fin)
-            
+            mask_segmento = (df_suave.index >= inicio) & (df_suave.index <= fin)
             df_segmento = df_suave.loc[mask_segmento, parcela]
-            
+
             if not df_segmento.empty:
-                # Ejecutar la detección pasando los límites correctos
                 resultado_sos = detectar_sos(
                     serie=df_segmento.values,
                     fechas=df_segmento.index,
                     factor=factor_sos,
                     metodo="seasonal_amplitude",
-                    # Si es el último ciclo, abrimos la ventana de búsqueda hasta el último dato real disponible
-                    ventana_busqueda=(inicio, df_suave.index.max()) if es_ultimo_segmento else (inicio, fin)
+                    ventana_busqueda=(inicio, fin)
                 )
                 
                 fecha_sos = resultado_sos.get('sos_fecha')
@@ -249,6 +237,39 @@ def graficar_whittaker_sos(fecha_inicio, fecha_fin, indice_nombre="EVI", distanc
                         fig.add_trace(go.Scatter(x=[fecha_sos], y=[None], mode='lines', line=dict(color='green', dash='dash'), name='Start of Season (SOS)', showlegend=True))
                         label_sos_agregado = True
                     
+                    fig.add_annotation(
+                        x=fecha_sos, y=0.95, yref="paper",
+                        text=f"SOS: {fecha_sos.strftime('%Y-%m-%d')}",
+                        showarrow=False, textangle=-90, xanchor="left", yanchor="top",
+                        font=dict(color="green", size=9, family="Arial", weight="bold"),
+                        bgcolor="rgba(255, 255, 255, 0.75)"
+                    )
+
+        # F. Procesar segmento final abierto (último valle → fin de la serie)
+        # segmentar_ciclos solo retorna segmentos entre valles consecutivos;
+        # el segmento abierto después del último valle no se incluye.
+        ultimo_valle = segmentos[-1][1]
+        if ultimo_valle < df_suave.index[-1]:
+            df_final = df_suave.loc[df_suave.index >= ultimo_valle, parcela]
+            if not df_final.empty:
+                resultado_sos = detectar_sos(
+                    serie=df_final.values,
+                    fechas=df_final.index,
+                    factor=factor_sos,
+                    metodo="seasonal_amplitude",
+                    ventana_busqueda=(ultimo_valle, df_suave.index.max())
+                )
+                fecha_sos = resultado_sos.get('sos_fecha')
+                if fecha_sos is not None:
+                    fecha_sos = pd.Timestamp(fecha_sos)
+                    fig.add_vline(x=fecha_sos, line_width=1.8, line_dash="dash", line_color="green")
+                    if not label_sos_agregado:
+                        fig.add_trace(go.Scatter(
+                            x=[fecha_sos], y=[None], mode='lines',
+                            line=dict(color='green', dash='dash'),
+                            name='Start of Season (SOS)', showlegend=True
+                        ))
+                        label_sos_agregado = True
                     fig.add_annotation(
                         x=fecha_sos, y=0.95, yref="paper",
                         text=f"SOS: {fecha_sos.strftime('%Y-%m-%d')}",
@@ -285,3 +306,59 @@ def graficar_whittaker_sos(fecha_inicio, fecha_fin, indice_nombre="EVI", distanc
             description="🌱 Parcela:"
         )
     )
+
+
+def visualizar_parcelas_en_mapa():
+    """Lee las parcelas vigentes de la BD activa (real o pruebas) y las
+
+    despliega en un mapa interactivo de Folium con capas satelital y de calles.
+    """
+    import folium
+    import geopandas as gpd
+    from utils.conexionDB import get_db_path
+    from config import LAYERS_GPKG
+
+    try:
+        gdf = gpd.read_file(str(get_db_path()), layer=LAYERS_GPKG["parcelas"])
+
+        
+        gdf = gdf.to_crs(epsg=4326)
+
+        centro = gdf.geometry.centroid
+        lat_centro = centro.y.mean()
+        lon_centro = centro.x.mean()
+
+        m = folium.Map(location=[lat_centro, lon_centro], zoom_start=13, width="800px", height="600px")
+
+        folium.TileLayer(
+            tiles="https://mt1.google.com/vt/lyrs=s&x={x}&y={y}&z={z}",
+            attr="Google Satellite",
+            name="Google Satélite",
+            overlay=False,
+            control=True,
+        ).add_to(m)
+
+        folium.TileLayer("OpenStreetMap", name="OpenStreetMap").add_to(m)
+
+        folium.GeoJson(
+            gdf,
+            name="Parcelas Vigentes",
+            style_function=lambda feature: {
+                "fillColor": "#22c55e",
+                "color": "#15803d",
+                "weight": 2,
+                "fillOpacity": 0.4,
+            },
+            tooltip=folium.GeoJsonTooltip(
+                fields=[col for col in gdf.columns if col != "geometry"][:5],
+                aliases=[f"{col}:" for col in gdf.columns if col != "geometry"][:5],
+                localize=True,
+            ),
+        ).add_to(m)
+
+        folium.LayerControl().add_to(m)
+
+        return m
+
+    except Exception as e:
+        print(f"Error al cargar parcelas desde la BD activa: {e}")

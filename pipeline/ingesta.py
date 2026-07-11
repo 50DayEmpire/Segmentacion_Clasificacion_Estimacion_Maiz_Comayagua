@@ -841,23 +841,14 @@ def obtener_indices(
     forzar_descarga: bool = False,
 ) -> dict[str, pd.DataFrame]:
     """
-    Versión con caché de ``obtener_datacube_indices_crudo``.
-
-    Consulta la BD primero y solo descarga de openEO las fechas que faltan.
-    Si la BD cubre el rango completo no se realiza ninguna petición a openEO.
-
-    Lógica
-    ------
-    1. Consultar BD para el rango [fecha_inicio, fecha_fin].
-    2. Detectar sub-rangos sin cobertura (gaps).
-    3. Para cada gap, llamar a ``obtener_datacube_indices_crudo`` y persistir
-       en BD con ``guardar_indices_crudos``.
-    4. Consolidar datos de BD + descargados y devolver el rango completo.
+    Descarga índices EVI/LSWI desde openEO para el rango completo y los
+    persiste en BD. Si ``forzar_descarga=True`` reemplaza los datos existentes;
+    caso contrario hace upsert (no sobreescribe valores no-NULL).
 
     Parámetros
     ----------
     connection : openeo.Connection
-        Conexión activa al backend CDSE. Solo se usa si hay gaps.
+        Conexión activa al backend CDSE.
     geojson_openeo : dict
         GeoJSON FeatureCollection con las parcelas en EPSG:4326.
     fecha_inicio : str
@@ -867,8 +858,7 @@ def obtener_indices(
     config_cloud_mask : dict | None
         Overrides para la máscara SCL. Igual que en ``obtener_datacube_indices_crudo``.
     forzar_descarga : bool
-        Si ``True``, ignora la BD y descarga el rango completo desde openEO,
-        sobreescribiendo los datos existentes (``mode="replace"``).
+        Si ``True``, sobreescribe los datos existentes (``mode="replace"``).
 
     Retorna
     -------
@@ -877,61 +867,16 @@ def obtener_indices(
         Mismo esquema que ``obtener_datacube_indices_crudo``.
     """
 
-    if forzar_descarga:
-        print(f"🔄  forzar_descarga=True — descargando [{fecha_inicio} → {fecha_fin}] completo desde openEO...")
-        dfs = obtener_datacube_indices_crudo(connection, geojson_openeo, fecha_inicio, fecha_fin, config_cloud_mask)
-        guardar_indices_crudos(dfs, mode="replace")
+    modo = "replace" if forzar_descarga else "append"
+    print(f"{'🔄' if forzar_descarga else '🛰️'}  Índices: descargando [{fecha_inicio} → {fecha_fin}] desde openEO...")
+    dfs = obtener_datacube_indices_crudo(connection, geojson_openeo, fecha_inicio, fecha_fin, config_cloud_mask)
+
+    if all(df.empty for df in dfs.values()):
+        print("  ⚠️  Sin datos retornados desde openEO.")
         return dfs
 
-    # ── 1. Consultar qué fechas ya fueron enviadas a openEO (con o sin NaN) ───
-    # No se usa el DataFrame de valores para detectar cobertura: una fecha
-    # nublada tiene fila en BD con evi_crudo=NULL y NO debe re-consultarse.
-    fechas_cubiertas = _fechas_consultadas_indices(fecha_inicio, fecha_fin)
+    guardar_indices_crudos(dfs, mode=modo)
 
-    # ── 2. Detectar gaps ──────────────────────────────────────────────────────
-    gaps = _detectar_gaps(fecha_inicio, fecha_fin, fechas_cubiertas)
-
-    # Ajustar extremos para semántica [start, end) de openEO:
-    # si start == end, extender end a end+1 para que el día sea incluido.
-    gaps = [
-        (s, (pd.Timestamp(e) + pd.Timedelta(days=1)).strftime("%Y-%m-%d"))
-        if s == e else (s, e)
-        for s, e in gaps
-    ]
-
-    if not gaps:
-        print(f"✅  Índices: BD cubre el rango completo [{fecha_inicio} → {fecha_fin}]. Sin descarga openEO.")
-        try:
-            return cargar_indices_desde_bd(fecha_inicio=fecha_inicio, fecha_fin=fecha_fin)
-        except ValueError:
-            return cargar_indices_desde_bd(fecha_inicio=fecha_inicio, fecha_fin=fecha_fin)
-
-    print(f"📡  Índices: {len(gaps)} gap(s) a descargar de openEO:")
-    for g_ini, g_fin in gaps:
-        print(f"     • {g_ini} → {g_fin}")
-
-    # ── 3. Descargar cada gap y persistir ─────────────────────────────────────
-    for g_ini, g_fin in gaps:
-        print(f"\n🛰️  Descargando gap [{g_ini} → {g_fin}]...")
-        try:
-            dfs_gap = obtener_datacube_indices_crudo(
-                connection, geojson_openeo, g_ini, g_fin, config_cloud_mask
-            )
-        except Exception as exc:
-            print(f"  ⚠️  Gap [{g_ini} → {g_fin}]: error ignorado — {exc}")
-            continue
-        if all(df.empty for df in dfs_gap.values()):
-            print(f"  ⚠️  Gap [{g_ini} → {g_fin}]: sin datos retornados, se omite.")
-            continue
-        try:
-            guardar_indices_crudos(dfs_gap, mode="append")
-        except Exception as exc:
-            print(f"  ⚠️  Gap [{g_ini} → {g_fin}]: error al persistir — {exc}")
-            continue
-
-    # ── 4. Recargar desde BD (fuente de verdad) y devolver rango completo ─────
-    # Se recarga desde BD en lugar de consolidar en memoria para garantizar que
-    # lo devuelto es exactamente lo que quedó persistido, incluyendo NaN por nubes.
     return cargar_indices_desde_bd(fecha_inicio=fecha_inicio, fecha_fin=fecha_fin)
 
 
@@ -1028,9 +973,13 @@ def obtener_clima(
         except Exception as exc:
             print(f"  ⚠️  Gap climático [{g_ini} → {g_fin}]: error al persistir — {exc}")
             continue
-
     # ── 4. Recargar desde BD (fuente de verdad) y devolver rango completo ─────
-    return cargar_clima_desde_bd(fecha_inicio=fecha_inicio, fecha_fin=fecha_fin)
+    fechas_finales = _fechas_consultadas_clima(fecha_inicio, fecha_fin)
+    if not fechas_finales.empty:
+        return cargar_clima_desde_bd(fecha_inicio=fecha_inicio, fecha_fin=fecha_fin)
+    print("  ⚠️  No hay datos climáticos en BD tras la descarga. Todos los gaps fallaron.")
+    return {"temperature-mean": pd.DataFrame(), "solar-radiation-flux": pd.DataFrame()}
+
 
 def guardar_indices_crudos(
     dfs: dict[str, pd.DataFrame],
