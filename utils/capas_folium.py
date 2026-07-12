@@ -25,6 +25,7 @@ def agregar_capa_poligonos(
     columnas_popup: list[str] | None = None,
     mostrar_tooltip: bool = True,
     resaltar_hover: bool = True,
+    locked: bool = False,
 ) -> folium.Map:
     """
     Agrega una capa de polígonos desde un GeoDataFrame a un mapa Folium.
@@ -139,6 +140,7 @@ def agregar_capa_poligonos(
         # ANTES de updateComponentValue (250ms debounce).
         on_each = folium.JsCode(f"""
         function(feature, layer) {{
+            {'' if not locked else 'layer._ltoLocked = true;'}
             layer.bindPopup('<div style="min-width:120px;">' {html_parts} + '</div>');
             layer.on('click', function(e) {{
                 Promise.resolve().then(function() {{
@@ -151,6 +153,7 @@ def agregar_capa_poligonos(
     else:
         on_each = folium.JsCode(f"""
         function(feature, layer) {{
+            {'' if not locked else 'layer._ltoLocked = true;'}
             {hover_js}
         }}
         """)

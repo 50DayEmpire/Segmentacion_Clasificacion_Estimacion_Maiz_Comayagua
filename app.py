@@ -33,6 +33,10 @@ pg = st.navigation(
         "Análisis Histórico": [
             st.Page("pages/6_Analisis_Historico.py", title="Análisis Histórico", icon="📅"),
         ],
+        "Administración": [
+            st.Page("pages/7_Clasificacion_Parcelas.py", title="Clasificación de Parcelas", icon="🏷️"),
+            st.Page("pages/8_Segmentacion_Parcelas.py", title="Segmentación de Parcelas", icon="✂️"),
+        ],
         "Acerca de": [
             st.Page("pages/5_Acerca_de.py", title="Acerca de", icon="ℹ️"),
         ],

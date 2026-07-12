@@ -25,9 +25,11 @@ dependencies = [
 
 [dependency-groups]
 dev = [
+    "geoviews>=1.15.1",
     "ipykernel>=7.3.0",
     "ipython>=9.15.0",
     "ipywidgets>=8.1.8",
+    "mapclassify>=2.10.0",
     "matplotlib>=3.11.0",
     "nbformat>=5.10.4",
     "pytest>=9.1.1",

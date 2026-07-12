@@ -362,3 +362,24 @@ def visualizar_parcelas_en_mapa():
 
     except Exception as e:
         print(f"Error al cargar parcelas desde la BD activa: {e}")
+
+def visualizar_parcelas_hvplot():
+    """Lee las parcelas vigentes de la BD activa (real o pruebas) y las despliega en un mapa interactivo con hvplot."""
+    import geopandas as gpd
+    from utils.conexionDB import get_db_path
+    from config import LAYERS_GPKG
+    import hvplot.pandas  # activa hvplot para GeoDataFrames
+
+    gdf = gpd.read_file(str(get_db_path()), layer=LAYERS_GPKG["parcelas"]).to_crs(epsg=4326)
+
+    # Mapa interactivo con tamaño ampliado
+    return gdf.hvplot(
+        geo=True, 
+        tiles="OSM", 
+        hover_cols=["id_parcela"],
+        tools=["hover"],  # <-- Forzamos la herramienta de hover de Bokeh
+        width=900,       
+        height=600,      
+        title="Visualización de Parcelas"
+    )
+    # return gdf.explore(column="id_parcela", tooltip=["id_parcela"], width=900, height=600)

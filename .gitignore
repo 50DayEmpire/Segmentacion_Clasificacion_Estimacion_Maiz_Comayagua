@@ -34,6 +34,7 @@ build/
 *.npz
 *.xml
 *.kml
+Datos Referencia/
 
 # ── Variables de entorno y secretos ───────────────────────────────────────────
 .env

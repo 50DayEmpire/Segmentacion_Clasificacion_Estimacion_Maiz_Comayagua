@@ -7,6 +7,7 @@ GPKG_PATH          = ROOT / "data" / "pipeline.gpkg"
 GPKG_PRUEBAS_PATH   = ROOT / "data" / "pipeline_pruebas.gpkg"
 # MUNICIPIO_GEOJSON  = ROOT / "static" / "ComayaguaMunicipio.geojson"
 MUNICIPIO_GEOJSON  = ROOT / "static" / "ValleComayagua.geojson"
+CAPAS_SEGMENTACION = ROOT / "delineate_anything" / "data" / "delineated"
 
 # ── Endpoints ──────────────────────────────────────────────────────────────────
 OPENEO = "openeo.dataspace.copernicus.eu"

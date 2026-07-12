@@ -6,9 +6,11 @@ Renderiza el mapa interactivo de parcelas con st_folium().
 - Botón para centrar el mapa en el área de estudio.
 """
 import folium
+import geopandas as gpd
 import streamlit as st
 from streamlit_folium import st_folium
-from folium.plugins import Fullscreen
+from folium.plugins import Fullscreen, Draw
+from shapely import force_2d
 
 from config import (
     MAPA_CENTRO_LAT,
@@ -116,6 +118,8 @@ def render_mapa_parcelas(
     key: str | None = None,
     center: list[float] | None = None,
     zoom: int | None = None,
+    gdf_externo: gpd.GeoDataFrame | None = None,
+    nombre_externo: str | None = None,
 ) -> dict | None:
     """
     Renderiza el mapa interactivo de parcelas.
@@ -132,15 +136,24 @@ def render_mapa_parcelas(
         Centro del mapa ``[lat, lng]`` para restaurar vista previa.
     zoom : int | None, opcional
         Nivel de zoom para restaurar vista previa.
+    gdf_externo : GeoDataFrame | None, opcional
+        Si se provee, se usa como capa de polígonos en lugar de cargar
+        desde la base de datos. Se muestra con un color neutro y se
+        habilita el plugin Draw para edición.
+    nombre_externo : str | None, opcional
+        Nombre descriptivo para mostrar en la barra de estado cuando
+        se usa ``gdf_externo`` (ej. nombre del archivo).
 
     Retorna
     -------
     dict | None
-        Resultado de ``st_folium`` con ``last_object_clicked``, ``center``, ``zoom``.
+        Resultado de ``st_folium`` con ``last_object_clicked``, ``center``, ``zoom``,
+        y ``all_drawings`` cuando se usa ``gdf_externo``.
     """
     ciclo      = filtros.get("ciclo", "primera")
     ventana    = filtros.get("ventana", "T1")
     modo_color = filtros.get("modo_color", "cultivo")
+    es_externo = gdf_externo is not None
 
     # ── Estado del mapa (centering → idle) ────────────────────────────────────
     if "centrar_revision" not in st.session_state:
@@ -160,7 +173,10 @@ def render_mapa_parcelas(
 
     # ── Cargar datos ───────────────────────────────────────────────────────────
     gdf_municipio = cargar_municipio()
-    gdf_parcelas  = cargar_parcelas(layer=LAYERS_GPKG.get("parcelas", "parcelas_vigentes"))
+    if not es_externo:
+        gdf_parcelas = cargar_parcelas(layer=LAYERS_GPKG.get("parcelas", "parcelas_vigentes"))
+    else:
+        gdf_parcelas = gdf_externo
 
     # ── Construir mapa base ────────────────────────────────────────────────────
     mapa = _construir_mapa_base(centrar_en_estudio=st.session_state["mapa_centrar_pendiente"])
@@ -185,11 +201,50 @@ def render_mapa_parcelas(
     columnas_reales = [c for c in ["id_parcela", "area_ha", "area_m2"] if c in gdf_parcelas.columns]
 
     if gdf_parcelas.empty:
-        st.warning(
-            "No hay parcelas en la base de datos. "
-            "Ejecuta el seeding (`python main.py`) para cargar geometrías.",
-            icon="⚠️",
-        )
+        if es_externo:
+            st.warning("La capa seleccionada no contiene polígonos.", icon="⚠️")
+        else:
+            st.warning(
+                "No hay parcelas en la base de datos. "
+                "Ejecuta el seeding (`python main.py`) para cargar geometrías.",
+                icon="⚠️",
+            )
+    elif es_externo:
+        gdf_layer = gdf_parcelas.copy()
+        gdf_layer["geometry"] = gdf_layer["geometry"].apply(force_2d)
+        cols_gdf = [c for c in gdf_layer.columns if c != gdf_layer.geometry.name]
+
+        fg_edit = folium.FeatureGroup(name="Polígonos segmentados", show=True)
+        folium.GeoJson(
+            gdf_layer,
+            style_function=lambda x: {
+                "fillColor": "#3498db",
+                "color": "#2980b9",
+                "weight": 2,
+                "fillOpacity": 0.3,
+            },
+            tooltip=folium.GeoJsonTooltip(
+                fields=cols_gdf[:5],
+                aliases=[f"{c}:" for c in cols_gdf[:5]],
+            ) if cols_gdf else None,
+        ).add_to(fg_edit)
+        fg_edit.add_to(mapa)
+
+        Draw(
+            export=False,
+            feature_group=fg_edit,
+            position="topleft",
+            show_geometry_on_click=False,
+            draw_options={
+                "polyline": False,
+                "polygon": True,
+                "rectangle": True,
+                "circle": False,
+                "marker": False,
+                "circlemarker": False,
+            },
+            edit_options={"edit": True, "remove": True},
+        ).add_to(mapa)
     else:
         color = COLORES_CICLO.get(ciclo, "#2ecc71")
 
@@ -220,7 +275,8 @@ def render_mapa_parcelas(
 
     # ── Leyenda flotante y CSS ──────────────────────────────────────────────────
     _agregar_css_no_select(mapa)
-    _agregar_leyenda_flotante(mapa, modo_color)
+    if not es_externo:
+        _agregar_leyenda_flotante(mapa, modo_color)
 
     # ── LayerControl ───────────────────────────────────────────────────────────
     folium.LayerControl(position="topright", collapsed=False).add_to(mapa)
@@ -229,30 +285,49 @@ def render_mapa_parcelas(
     Fullscreen(position="topleft", title="Pantalla completa", title_cancel="Salir de pantalla completa").add_to(mapa)
 
     # ── Barra de estado ────────────────────────────────────────────────────────
-    modo_label = (
-        "Cultivo clasificado" if modo_color == "cultivo"
-        else f"Rendimiento estimado (qq/ha) — ventana {ventana}"
-    )
-    n_parcelas = len(gdf_parcelas) if not gdf_parcelas.empty else 0
-    st.markdown(
-        f"""
-        <div style='background:#1a1d23; border:1px solid #2d3139; border-radius:6px;
-                    padding:.5rem .9rem; margin-bottom:.5rem; font-size:.85rem;
-                    display:flex; gap:1.5rem; flex-wrap:wrap;'>
-            <span>🎨 <b>{modo_label}</b></span>
-            <span>📅 Ciclo: <b>{ciclo.title()}</b></span>
-            <span>🗺️ Parcelas: <b>{n_parcelas}</b></span>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
+    n_poligonos = len(gdf_parcelas) if not gdf_parcelas.empty else 0
+
+    if es_externo:
+        label_capa = nombre_externo or "Capa externa"
+        st.markdown(
+            f"""
+            <div style='background:#1a1d23; border:1px solid #2d3139; border-radius:6px;
+                        padding:.5rem .9rem; margin-bottom:.5rem; font-size:.85rem;
+                        display:flex; gap:1.5rem; flex-wrap:wrap;'>
+                <span>📁 <b>{label_capa}</b></span>
+                <span>🗺️ Polígonos: <b>{n_poligonos}</b></span>
+                <span>✏️ Edición activa</span>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+    else:
+        modo_label = (
+            "Cultivo clasificado" if modo_color == "cultivo"
+            else f"Rendimiento estimado (qq/ha) — ventana {ventana}"
+        )
+        st.markdown(
+            f"""
+            <div style='background:#1a1d23; border:1px solid #2d3139; border-radius:6px;
+                        padding:.5rem .9rem; margin-bottom:.5rem; font-size:.85rem;
+                        display:flex; gap:1.5rem; flex-wrap:wrap;'>
+                <span>🎨 <b>{modo_label}</b></span>
+                <span>📅 Ciclo: <b>{ciclo.title()}</b></span>
+                <span>🗺️ Parcelas: <b>{n_poligonos}</b></span>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
 
     # ── Renderizado con st_folium ──────────────────────────────────────────────
-    map_key = key or f"mapa_parcelas_{modo_color}_v{st.session_state['centrar_revision']}"
+    returned = ["last_object_clicked", "center", "zoom"]
+    if es_externo:
+        returned.append("all_drawings")
+    map_key = key or f"mapa_{'ext' if es_externo else modo_color}_v{st.session_state['centrar_revision']}"
     kwargs = dict(
         width="100%",
         height=560,
-        returned_objects=["last_object_clicked", "center", "zoom"],
+        returned_objects=returned,
         key=map_key,
     )
     if center is not None:

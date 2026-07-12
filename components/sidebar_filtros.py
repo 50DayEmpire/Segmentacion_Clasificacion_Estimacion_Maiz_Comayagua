@@ -271,3 +271,69 @@ def render_filtros_historico() -> dict:
     )
 
     return {"anio": anio, "ciclo": ciclo, "ventana": ventana}
+
+
+def render_filtros_segmentacion() -> dict:
+    """
+    Filtros para la vista Segmentación de Parcelas.
+
+    Escanea ``CAPAS_SEGMENTACION`` en busca de archivos ``.gpkg``
+    generados por delineate-anything y los presenta como opciones
+    seleccionables mediante radio buttons.
+
+    Retorna
+    -------
+    dict con claves:
+        archivo_gpkg : str  — ruta completa al archivo .gpkg seleccionado
+        nombre_capa  : str  — nombre del archivo (ej. "Sample.gpkg")
+    """
+    from config import CAPAS_SEGMENTACION
+    from pathlib import Path
+
+    _encabezado_sidebar()
+    st.markdown("### 📁 Capas de Segmentación")
+
+    ruta = Path(CAPAS_SEGMENTACION)
+    if not ruta.is_dir():
+        st.warning(f"La ruta de capas no existe:\n`{ruta}`", icon="⚠️")
+        return {"archivo_gpkg": None, "nombre_capa": None}
+
+    gpkg_files = sorted(ruta.glob("*.gpkg"))
+    if not gpkg_files:
+        st.info("No hay archivos .gpkg en el directorio de segmentación.", icon="📭")
+        return {"archivo_gpkg": None, "nombre_capa": None}
+
+    opciones = {}
+    for f in gpkg_files:
+        tam = f.stat().st_size
+        if tam < 1024:
+            tam_str = f"{tam} B"
+        elif tam < 1024**2:
+            tam_str = f"{tam/1024:.1f} KB"
+        else:
+            tam_str = f"{tam/1024**2:.1f} MB"
+        label = f"{f.name}  ({tam_str})"
+        opciones[label] = str(f)
+
+    etiqueta = st.radio(
+        "Selecciona una capa",
+        options=list(opciones.keys()),
+        index=0,
+        help="Capa de polígonos generada por el modelo de segmentación.",
+    )
+
+    archivo_gpkg = opciones[etiqueta]
+    nombre_capa = Path(archivo_gpkg).name
+
+    st.markdown(
+        f"""
+        <div style='margin-top:.8rem; padding:.5rem .8rem;
+                    border-left:4px solid #3498db; background:#1a1d23;
+                    border-radius:4px; font-size:.85rem;'>
+            Capa activa: <b style='color:#3498db;'>{nombre_capa}</b>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    return {"archivo_gpkg": archivo_gpkg, "nombre_capa": nombre_capa}
