@@ -278,62 +278,114 @@ def render_filtros_segmentacion() -> dict:
     Filtros para la vista Segmentación de Parcelas.
 
     Escanea ``CAPAS_SEGMENTACION`` en busca de archivos ``.gpkg``
-    generados por delineate-anything y los presenta como opciones
-    seleccionables mediante radio buttons.
+    generados por delineate-anything (borradores) y presenta GPKGs
+    validados (``data/*.gpkg`` con seeding) para seleccionar BD activa.
 
     Retorna
     -------
     dict con claves:
-        archivo_gpkg : str  — ruta completa al archivo .gpkg seleccionado
+        archivo_gpkg : str  — ruta completa al archivo .gpkg seleccionado (borrador)
         nombre_capa  : str  — nombre del archivo (ej. "Sample.gpkg")
+        es_borrador  : bool — True si el seleccionado está en CAPAS_SEGMENTACION
     """
-    from config import CAPAS_SEGMENTACION
     from pathlib import Path
+    from config import CAPAS_SEGMENTACION, ROOT
+    from utils.conexionDB import get_db_path, listar_gpkgs_validados, set_db_path
+    from utils.db import validar_gpkg
+    from utils.gpkg_layer import asegurar_capa_parcelas, limpiar_legacy
 
     _encabezado_sidebar()
-    st.markdown("### 📁 Capas de Segmentación")
 
-    ruta = Path(CAPAS_SEGMENTACION)
-    if not ruta.is_dir():
-        st.warning(f"La ruta de capas no existe:\n`{ruta}`", icon="⚠️")
-        return {"archivo_gpkg": None, "nombre_capa": None}
+    archivo_gpkg = None
+    nombre_capa = None
+    es_borrador = False
 
-    gpkg_files = sorted(ruta.glob("*.gpkg"))
-    if not gpkg_files:
-        st.info("No hay archivos .gpkg en el directorio de segmentación.", icon="📭")
-        return {"archivo_gpkg": None, "nombre_capa": None}
+    # ── Sección: Borradores (delineate_anything) ──────────────────────────
+    st.markdown("### 📁 Borradores")
+    ruta_drafts = Path(CAPAS_SEGMENTACION)
+    gpkg_drafts = sorted(ruta_drafts.glob("*.simp.gpkg")) if ruta_drafts.is_dir() else []
 
-    opciones = {}
-    for f in gpkg_files:
-        tam = f.stat().st_size
-        if tam < 1024:
-            tam_str = f"{tam} B"
-        elif tam < 1024**2:
-            tam_str = f"{tam/1024:.1f} KB"
-        else:
-            tam_str = f"{tam/1024**2:.1f} MB"
-        label = f"{f.name}  ({tam_str})"
-        opciones[label] = str(f)
+    if not gpkg_drafts:
+        st.info("No hay borradores .gpkg en el directorio de segmentación.", icon="📭")
+    else:
+        opciones = {}
+        for f in gpkg_drafts:
+            tam = f.stat().st_size
+            if tam < 1024:
+                tam_str = f"{tam} B"
+            elif tam < 1024 ** 2:
+                tam_str = f"{tam / 1024:.1f} KB"
+            else:
+                tam_str = f"{tam / 1024 ** 2:.1f} MB"
+            label = f"{f.name}  ({tam_str})"
+            opciones[label] = str(f)
 
-    etiqueta = st.radio(
-        "Selecciona una capa",
-        options=list(opciones.keys()),
-        index=0,
-        help="Capa de polígonos generada por el modelo de segmentación.",
-    )
+        draft_key = st.radio(
+            "Selecciona un borrador",
+            options=list(opciones.keys()),
+            index=0,
+            key="draft_selector",
+            help="Capa generada por el modelo de segmentación (delineate-anything).",
+        )
 
-    archivo_gpkg = opciones[etiqueta]
-    nombre_capa = Path(archivo_gpkg).name
+        archivo_gpkg = opciones[draft_key]
+        nombre_capa = Path(archivo_gpkg).name
+        es_borrador = True
+        asegurar_capa_parcelas(archivo_gpkg)
+        limpiar_legacy(archivo_gpkg)
 
-    st.markdown(
-        f"""
-        <div style='margin-top:.8rem; padding:.5rem .8rem;
-                    border-left:4px solid #3498db; background:#1a1d23;
-                    border-radius:4px; font-size:.85rem;'>
-            Capa activa: <b style='color:#3498db;'>{nombre_capa}</b>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
+        if st.button("✅ Validar a producción", use_container_width=True,
+                      help="Copia a data/ y ejecuta seeding (crea tablas del pipeline)."):
+            with st.spinner("Validando GPKG…"):
+                try:
+                    destino = validar_gpkg(archivo_gpkg)
+                    st.success(f"Validado: {destino.name}")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Error al validar: {e}", icon="❌")
 
-    return {"archivo_gpkg": archivo_gpkg, "nombre_capa": nombre_capa}
+    st.divider()
+
+    # ── Sección: Bases de datos validadas ─────────────────────────────────
+    st.markdown("### 🗄️ BD Validadas")
+    gpkgs_validados = listar_gpkgs_validados()
+
+    if not gpkgs_validados:
+        st.info("No hay GPKGs validados en data/.", icon="📭")
+    else:
+        db_actual = get_db_path().resolve()
+        opciones_bd = {p.name: str(p) for p in gpkgs_validados}
+        idx_actual = 0
+        for i, p in enumerate(gpkgs_validados):
+            if p.resolve() == db_actual:
+                idx_actual = i
+                break
+
+        bd_seleccionada = st.selectbox(
+            "Base de datos activa",
+            options=list(opciones_bd.keys()),
+            index=idx_actual,
+            key="bd_selector",
+            help="Cambia la BD activa del observatorio (solo GPKGs con seeding).",
+        )
+
+        bd_path = opciones_bd[bd_seleccionada]
+        if Path(bd_path).resolve() != db_actual:
+            set_db_path(bd_path)
+            st.cache_data.clear()
+            st.rerun()
+
+        st.markdown(
+            f"""<div style='margin-top:.5rem; padding:.5rem .8rem;
+                        border-left:4px solid #2ecc71; background:#1a1d23;
+                        border-radius:4px; font-size:.85rem;'>
+                🟢 BD activa: <b style='color:#2ecc71;'>{bd_seleccionada}</b>
+            </div>""",
+            unsafe_allow_html=True,
+        )
+
+    return {
+        "archivo_gpkg": archivo_gpkg,
+        "nombre_capa": nombre_capa,
+        "es_borrador": es_borrador,
+    }

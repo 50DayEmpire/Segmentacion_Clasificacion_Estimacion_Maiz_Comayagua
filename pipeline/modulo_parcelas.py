@@ -1,5 +1,6 @@
 import subprocess
 import os
+from datetime import datetime
 from pathlib import Path
 import geopandas as gpd
 
@@ -27,9 +28,21 @@ def _load_spatial_extent(geojson_path: Path) -> dict:
 
 def ejecutar_delineate_anything_local(
     batch_config: Path | str = DELINEATE_BATCH_CONFIG,
+    suffix: str = "",
 ) -> None:
-    """Ejecuta Delineate-Anything localmente dentro del entorno Conda 'tesis_maiz' con GPU."""
+    """Ejecuta Delineate-Anything localmente dentro del entorno Conda 'tesis_maiz'.
+
+    Parameters
+    ----------
+    batch_config : Path | str
+        Ruta al archivo YAML de configuración batch.
+    suffix : str
+        Sufijo añadido al nombre del archivo de salida (antes de .gpkg).
+        Si es vacío, se genera automáticamente con timestamp.
+    """
     batch_config_path = Path(batch_config)
+    if not suffix:
+        suffix = f"_{datetime.now():%Y%m%d_%H%M%S}"
     
     # Validaciones previas de archivos
     if not batch_config_path.exists():
@@ -39,7 +52,7 @@ def ejecutar_delineate_anything_local(
     if not os.path.exists(CONDA_EXE):
         raise FileNotFoundError(f"No se detectó el ejecutable de Conda en la ruta especificada: {CONDA_EXE}")
 
-    print(f" Lanzando inferencia por lotes en entorno Conda '{CONDA_ENV_NAME}' usando GPU...")
+    print(f" Lanzando inferencia por lotes en entorno Conda '{CONDA_ENV_NAME}'...")
     print(f"Configuración utilizada: {batch_config_path.name}")
 
     # La magia en Windows: Usamos 'conda run -n nombre_entorno'
@@ -49,7 +62,8 @@ def ejecutar_delineate_anything_local(
         "-n", CONDA_ENV_NAME, 
         "--no-capture-output",  # Para que veas el progreso de YOLO en tiempo real en tu consola
         "python", str(DELINEATE_SCRIPT), 
-        "-b", str(batch_config_path)
+        "-b", str(batch_config_path),
+        "--suffix", suffix,
     ]
 
     try:

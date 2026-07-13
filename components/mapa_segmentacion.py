@@ -25,14 +25,19 @@ from utils.queries import cargar_municipio
 from utils.capas_folium import agregar_capa_poligonos
 
 
-def _build_toolbar_js() -> str:
+def _build_toolbar_js(archivo_gpkg: str = "") -> str:
     """Genera el JavaScript toolbar + Leaflet.Editable (usa window.__folium_map)."""
+    _GPKG_PH = "___ARCHIVO_GPKG___"
+    _API_URL_PH = "___SAVE_API_URL___"
+    _save_api_url = "http://localhost:8765/save"
+
     tool_html = """<div id="leetoolbar">
   <button class="ltb" onclick="ltoToggleEdit()" id="ltb-edit" title="Editar v\u00e9rtices">\u270f\ufe0f</button>
   <button class="ltb" onclick="ltoDrawPolygon()" title="Dibujar pol\u00edgono">\u2b21</button>
   <button class="ltb" onclick="ltoDrawRectangle()" title="Dibujar rect\u00e1ngulo">\u25ac</button>
-  <button class="ltb" id="ltb-delete" onclick="ltoDeleteSelected()" style="display:none" title="Eliminar pol\u00edgono">\U0001F5D1</button>
-  <button class="ltb" onclick="ltoDownload()" title="Descargar GeoJSON">\U0001F4BE</button>
+  <button class="ltb" id="ltb-delete" onclick="ltoToggleDeleteMode()" title="Eliminar pol\u00edgono (clic para activar/desactivar modo)">\U0001F5D1</button>
+  <button class="ltb" onclick="ltoDownload()" title="Descargar GeoJSON">\U0001F4E5</button>
+  <button class="ltb ltb-save" onclick="ltoSaveToGpkg()" title="Guardar cambios en GPKG">\U0001F4BE Guardar</button>
   <a id="ltb-dl-link" style="display:none"></a>
 </div>"""
 
@@ -41,19 +46,25 @@ def _build_toolbar_js() -> str:
   .ltb {width:36px;height:36px;border:1px solid #2d3139;border-radius:6px;background:#1a1d23;color:#eee;font-size:1rem;cursor:pointer;display:flex;align-items:center;justify-content:center;transition:background .15s;box-shadow:0 2px 6px rgba(0,0,0,.3);}
   .ltb:hover {background:#2d3139;}
   .ltb.active {background:#2980b9;border-color:#3498db;}
+  .ltb-save {width:auto;padding:0 12px;gap:4px;background:#27ae60;border-color:#2ecc71;margin-top:4px;}
+  .ltb-save:hover {background:#2ecc71;}
 </style>"""
 
-    js = """<script src="https://cdn.jsdelivr.net/npm/leaflet-editable@1.3.2/src/Leaflet.Editable.js"></script>
+    import pathlib
+    _le_path = pathlib.Path(__file__).parent / "mapa_segmentacion" / "static" / "Leaflet.Editable.js"
+    _le_js = _le_path.read_text(encoding="utf-8")
+    le_script_tag = "<script>" + _le_js + "</script>"
+    js = le_script_tag + """
 <script>
 (function(){
 var map = window.__folium_map;
 if (!map) { console.error('LTO: __folium_map not set'); return; }
-console.log('LTO: map type:', typeof map, 'keys:', Object.keys(map).slice(0,10), 'eachLayer:', typeof map.eachLayer, 'addLayer:', typeof map.addLayer, '_leaflet_id:', map._leaflet_id);
 
 var selectedLayer = null;
 var editMode = false;
 var editableReady = false;
 var DRAW_GROUP = null;
+var deleteMode = false;
 
 try {
   if (typeof L.Editable !== 'undefined') {
@@ -97,12 +108,36 @@ window.ltoDrawRectangle = function() {
   } catch(e) { console.error('LTO: startRectangle error', e); }
 };
 
+function deletePolygon(layer) {
+  (function removeFromParents(parent) {
+    if (!parent || !parent.eachLayer) return;
+    parent.eachLayer(function(child) {
+      if (child === layer) {
+        parent.removeLayer(child);
+      } else if (child.eachLayer) {
+        removeFromParents(child);
+      }
+    });
+  })(map);
+  if (DRAW_GROUP) DRAW_GROUP.removeLayer(layer);
+  if (selectedLayer === layer) {
+    selectedLayer = null;
+  }
+}
+
+window.ltoToggleDeleteMode = function() {
+  deleteMode = !deleteMode;
+  if (deleteMode) {
+    document.getElementById('ltb-delete').classList.add('active');
+  } else {
+    document.getElementById('ltb-delete').classList.remove('active');
+    if (selectedLayer) deselect();
+  }
+};
+
 window.ltoDeleteSelected = function() {
   if (!selectedLayer) return;
-  var layer = selectedLayer;
-  deselect();
-  map.removeLayer(layer);
-  if (DRAW_GROUP) DRAW_GROUP.removeLayer(layer);
+  deletePolygon(selectedLayer);
 };
 
 window.ltoDownload = function() {
@@ -124,6 +159,52 @@ window.ltoDownload = function() {
   URL.revokeObjectURL(url);
 };
 
+window.ltoDiagnose = function() {
+  var total = 0;
+  var setup = 0;
+  collectAllPolygons(function(poly) {
+    total++;
+    if (poly._ltoSetup) setup++;
+  });
+  var msg = 'En mapa: total=' + total + ' setup=' + setup + ' directas=' + (map._layers ? Object.keys(map._layers).length : '?');
+  console.log('[LTO] Diagnostico:', {total: total, setup: setup});
+  alert(msg);
+};
+
+window.ltoSaveToGpkg = function() {
+  var features = [];
+  collectAllPolygons(function(poly) {
+    if (!poly._ltoSetup) return;
+    try {
+      if (!poly.getLatLngs || !poly.getLatLngs().length) return;
+      var gj = poly.toGeoJSON();
+      if (gj && gj.geometry) {
+        features.push({type:'Feature', geometry:gj.geometry, properties:poly.feature?.properties||{}});
+      }
+    } catch(e) { console.warn('SKIP: export error', e); }
+  });
+  console.log('[LTO] ltoSaveToGpkg: features colectados =', features.length);
+  if (features.length === 0) return;
+  var geojson = {type:'FeatureCollection', features:features};
+  var ltoBtn = document.getElementById('ltb-save');
+  if (ltoBtn) { ltoBtn.textContent = '...'; ltoBtn.disabled = true; }
+  fetch('___SAVE_API_URL___', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({geojson: JSON.stringify(geojson), archivo_gpkg: '___ARCHIVO_GPKG___'}),
+  }).then(function(r){ return r.json(); }).then(function(data){
+    if (data.status === 'ok') {
+      alert('Guardado exitoso. Presiona "Limpiar cach\u00e9" en el panel izquierdo.');
+    } else {
+      alert('Error al guardar: ' + (data.message || '?'));
+    }
+  }).catch(function(e){
+    alert('Error de conexi\u00f3n: ' + e.message + '. Aseg\u00farate que el servidor local en puerto 8765 est\u00e9 activo.');
+  }).finally(function(){
+    if (ltoBtn) { ltoBtn.textContent = 'Save'; ltoBtn.disabled = false; }
+  });
+};
+
 // Map setup
 try {
   function collectAllPolygons(fn) {
@@ -140,7 +221,6 @@ try {
 
   function setupPolygon(poly) {
     if (poly._ltoSetup) return;
-    // Saltar capas bloqueadas (municipio)
     if (poly._ltoLocked) return;
     poly._ltoSetup = true;
     poly._origStyle = {
@@ -151,7 +231,11 @@ try {
     };
     poly.on('click', function(e) {
       L.DomEvent.stopPropagation(e);
-      selectLayer(poly);
+      if (deleteMode) {
+        deletePolygon(poly);
+      } else {
+        selectLayer(poly);
+      }
     });
   }
 
@@ -160,7 +244,6 @@ try {
     try { if (selectedLayer.editor) selectedLayer.disableEdit(); } catch(e) {}
     selectedLayer.setStyle(selectedLayer._origStyle || origStyle);
     selectedLayer = null;
-    document.getElementById('ltb-delete').style.display='none';
     document.getElementById('ltb-edit').classList.remove('active');
     editMode = false;
   }
@@ -170,7 +253,6 @@ try {
     deselect();
     selectedLayer = layer;
     layer.setStyle(hiStyle);
-    document.getElementById('ltb-delete').style.display='flex';
     if (editableReady && editMode) {
       try { layer.enableEdit(); } catch(e) {}
       document.getElementById('ltb-edit').classList.add('active');
@@ -197,8 +279,6 @@ try {
         if (!DRAW_GROUP) { DRAW_GROUP = L.featureGroup().addTo(map); }
         DRAW_GROUP.addLayer(layer);
         setupPolygon(layer);
-        // setTimeout para evitar que el click que completó el dibujo
-        // también dispare deselect() en el mismo ciclo de eventos
         setTimeout(function() { selectLayer(layer); }, 0);
       }
     });
@@ -208,13 +288,14 @@ try {
 document.addEventListener('keydown',function(e){
   if ((e.key==='Delete'||e.key==='Del') && selectedLayer) window.ltoDeleteSelected();
 });
+
 })();
 </script>"""
-
+    js = js.replace(_GPKG_PH, archivo_gpkg.replace("\\", "/")).replace(_API_URL_PH, _save_api_url)
     return tool_html + css + js
 
 
-def _construir_mapa(gdf) -> str:
+def _construir_mapa(gdf, archivo_gpkg: str = "") -> str:
     """Construye mapa Folium, inyecta monkey-patch + toolbar."""
     gdf = gdf.copy()
     gdf["geometry"] = gdf["geometry"].apply(force_2d)
@@ -307,7 +388,7 @@ def _construir_mapa(gdf) -> str:
     html = html[:end] + ref + html[end:]
 
     # 2) Toolbar + Leaflet.Editable al final (después de Folium scripts)
-    inject = _build_toolbar_js()
+    inject = _build_toolbar_js(archivo_gpkg)
     parts = html.split("</body>", 1)
     if len(parts) == 2:
         folium_scripts = parts[1].rsplit("</html>", 1)[0]
@@ -327,13 +408,24 @@ _VERSION_HASH = hashlib.md5(
 @st.cache_data(show_spinner=False)
 def _html_cacheado(archivo_gpkg: str, code_hash: str) -> tuple[str, int]:
     import geopandas as gpd
-    gdf = gpd.read_file(archivo_gpkg)
-    html = _construir_mapa(gdf)
+    import logging
+    _log = logging.getLogger(__name__)
+    try:
+        gdf = gpd.read_file(archivo_gpkg, layer="parcelas_vigentes")
+    except Exception:
+        gdf = gpd.read_file(archivo_gpkg)
+    _log.info("Mapa carga %d features de %s", len(gdf), archivo_gpkg)
+    html = _construir_mapa(gdf, archivo_gpkg)
     return html, len(gdf)
 
 
 def limpiar_cache() -> None:
     _html_cacheado.clear()
+
+
+def _on_run_model():
+    import streamlit as st
+    st.session_state.mostrar_confirmacion = True
 
 
 def render_mapa_segmentacion(
@@ -355,18 +447,28 @@ def render_mapa_segmentacion(
             st.info("Selecciona una capa de segmentación en el panel izquierdo.", icon="📁")
 
     label_capa = nombre_capa or "Capa de segmentación"
-    if es_externo:
-        st.markdown(
-            f"""
-            <div style='background:#1a1d23; border:1px solid #2d3139; border-radius:6px;
-                        padding:.5rem .9rem; margin:.5rem 0; font-size:.85rem;
-                        display:flex; gap:1.5rem; flex-wrap:wrap;'>
-                <span>📁 <b>{label_capa}</b></span>
-                <span>🗺️ Polígonos: <b>{n_poly}</b></span>
-                <span>✏️ Clic en polígono para seleccionar, luego editar/eliminar</span>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
-
-    return resultado
+    col_info, col_btn = st.columns([3, 1], vertical_alignment="center")
+    st.markdown(
+        "<style>div[data-testid='stHorizontalBlock'] > div:nth-child(2) button { transform:translateY(8px) }</style>",
+        unsafe_allow_html=True,
+    )
+    with col_info:
+        if es_externo:
+            st.markdown(
+                f"""
+                <div style='background:#1a1d23; border:1px solid #2d3139; border-radius:6px;
+                            padding:.5rem .9rem; margin:.5rem 0; font-size:.85rem;
+                    display:flex; gap:1.5rem; flex-wrap:wrap;'>
+                    <span>📁 <b>{label_capa}</b></span>
+                    <span>🗺️ Polígonos: <b>{n_poly}</b></span>
+                    <span>✏️ Clic en polígono para seleccionar, luego editar/eliminar</span>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+    with col_btn:
+        if es_externo:
+            st.button("▶️ Ejecutar segmentación", key="btn_run_model",
+                       use_container_width=True, type="primary",
+                       on_click=_on_run_model,
+                       help="Ejecuta delineate-anything para generar nuevas parcelas segmentadas.")

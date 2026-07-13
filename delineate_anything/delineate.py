@@ -140,7 +140,7 @@ def batch_routine(args):
             "name": folder,
             "config": config,
             "input": os.path.join(batch_config["data_root"], folder),
-            "output": os.path.join(batch_config["output_root"], folder + ".gpkg"),
+            "output": os.path.join(batch_config["output_root"], folder + args.suffix + ".gpkg"),
             "temp": batch_config["temp_root"],
             "keep_temp": batch_config["keep_temp"],
             "mask": mask_path
@@ -161,6 +161,9 @@ def main():
     
     parser.add_argument("--verbose", dest="verbose", action="store_true",
                     help="To display trace level logs. Mostly for dev purposes.")
+
+    parser.add_argument("--suffix", dest="suffix", default="",
+                    help="Suffix appended to the output filename before .gpkg")
 
     args = parser.parse_args()
 

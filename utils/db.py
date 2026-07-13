@@ -1,9 +1,11 @@
+import shutil
+import sqlite3
 from pathlib import Path
 from contextlib import closing
 from typing import Literal
 import geopandas as gpd
 import pandas as pd
-from config import GPKG_PRUEBAS_PATH
+from config import GPKG_PRUEBAS_PATH, ROOT
 from utils.conexionDB import get_connection_raw, get_db_path
 
 
@@ -15,48 +17,18 @@ def actualizar_gpkg(
     crs: str = "EPSG:32616",
     source_layer: str | None = None,
 ) -> None:
-    """
-    Actualiza un GeoPackage con geometrías, desde un archivo o un GeoDataFrame.
-
-    Parámetros
-    ----------
-    data : str | Path | gpd.GeoDataFrame
-        - Ruta a GeoJSON, Shapefile u otro vectorial: se lee directamente.
-        - Ruta a GeoPackage (``.gpkg``): se convierte a GeoDataFrame pasando
-          por GeoJSON en memoria (normaliza el esquema antes de escribir).
-          Usa ``source_layer`` para seleccionar la capa de origen; si se omite
-          se lee la primera capa disponible.
-        - ``gpd.GeoDataFrame``: se usa tal cual.
-    gpkg_path : str | Path | None
-        Ruta al GeoPackage destino. Si es ``None`` se usa la BD activa
-        (según ``set_db_mode`` en ``conexionDB.py``).
-    layer_name : str
-        Nombre de la capa dentro del GeoPackage destino.
-    mode : str
-        Modo de escritura: ``"replace"`` (sobrescribe) o ``"append"`` (agrega).
-    crs : str
-        CRS métrico para cálculos de área (por defecto EPSG:32616).
-    source_layer : str | None
-        Solo relevante cuando ``data`` es un ``.gpkg``.
-        Nombre de la capa de origen a leer. Si es ``None`` se usa la primera
-        capa listada por fiona/pyogrio.
-    """
     ruta = Path(gpkg_path) if gpkg_path is not None else get_db_path()
 
-    # Si el archivo existe pero está vacío o corrupto (0 bytes), eliminarlo
-    # para que pyogrio pueda crear uno nuevo limpio.
     if ruta.exists() and ruta.stat().st_size == 0:
         ruta.unlink()
         print(f"Archivo corrupto eliminado: {ruta}")
 
-    # ── Carga de datos de entrada ─────────────────────────────────────────────
     if isinstance(data, gpd.GeoDataFrame):
         gdf = data.copy()
 
     elif isinstance(data, (str, Path)):
         src = Path(data)
         if src.suffix.lower() == ".gpkg":
-            # Determinar capa de origen
             if source_layer is None:
                 import fiona
                 capas = fiona.listlayers(str(src))
@@ -69,14 +41,11 @@ def actualizar_gpkg(
                         f"Leyendo '{source_layer}'. "
                         f"Usa source_layer= para elegir otra: {capas}"
                     )
-            # Leer → serializar a GeoJSON en memoria → deserializar
-            # Esto normaliza el esquema y elimina metadatos propietarios del .gpkg origen.
             import json
             gdf_origen = gpd.read_file(str(src), layer=source_layer)
             gdf = gpd.read_file(gdf_origen.to_json(), driver="GeoJSON")
             print(f"📦  GeoPackage origen '{src.name}' (capa='{source_layer}'): {len(gdf)} geometrías.")
         else:
-            # GeoJSON, Shapefile, KML, etc.
             gdf = gpd.read_file(str(src))
 
     else:
@@ -101,7 +70,6 @@ def actualizar_gpkg(
             ultimo_id = -1
         gdf["id_parcela"] = range(ultimo_id + 1, ultimo_id + 1 + len(gdf))
 
-    # geopandas >= 1.0 con pyogrio usa mode="w"/"a", no if_exists
     modo_pyogrio = "w" if mode == "replace" else "a"
 
     gdf.to_file(
@@ -113,144 +81,153 @@ def actualizar_gpkg(
     print(f"{len(gdf)} geometrías escritas en '{ruta}' (capa='{layer_name}', modo={mode})")
 
 
+def _crear_tablas_sql(conn: sqlite3.Connection) -> None:
+    conn.execute("PRAGMA journal_mode=WAL;")
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS series_diarias_vpm (
+            id_parcela                  INTEGER NOT NULL,
+            fecha                       DATE    NOT NULL,
+            evi_crudo                   REAL,
+            lswi_crudo                  REAL,
+            temperatura_diaria_promedio REAL,
+            radiacion_total_promedio    REAL,
+            gpp_diario                  REAL,
+            PRIMARY KEY (id_parcela, fecha),
+            FOREIGN KEY (id_parcela) REFERENCES parcelas_vigentes(id_parcela)
+        );
+    """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS lswi_maximo (
+            id_parcela        INTEGER NOT NULL,
+            lswi_max          REAL,
+            temporada         TEXT,
+            PRIMARY KEY (id_parcela, temporada),
+            FOREIGN KEY (id_parcela) REFERENCES parcelas_vigentes(id_parcela)
+        );
+    """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS produccion_acumulada_ciclo (
+            id_ciclo          INTEGER PRIMARY KEY AUTOINCREMENT,
+            id_parcela        INTEGER NOT NULL,
+            temporada         TEXT NOT NULL,
+            lswi_max          REAL,
+            lswi_max_efectivo REAL,
+            fecha_inicio      DATE,
+            sos               DATE,
+            t1                DATE,
+            t2                DATE,
+            t3                DATE,
+            eos               DATE,
+            fecha_fin         DATE,
+            rendimiento       REAL,
+            produccion_total  REAL,
+            estado_ciclo      TEXT NOT NULL DEFAULT 'candidato',
+            CHECK (estado_ciclo IN ('candidato', 'activo', 'finalizado')),
+            CHECK (temporada IN ('primera', 'postrera')),
+            FOREIGN KEY (id_parcela) REFERENCES parcelas_vigentes(id_parcela)
+        );
+    """)
+    conn.execute("""
+        CREATE UNIQUE INDEX IF NOT EXISTS ux_ciclo_unico_no_finalizado
+            ON produccion_acumulada_ciclo (id_parcela, temporada)
+            WHERE estado_ciclo IN ('candidato', 'activo');
+    """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS indices_suavizados(
+            id_ciclo         INTEGER NOT NULL,
+            fecha            DATE    NOT NULL,
+            id_parcela       INTEGER NOT NULL,
+            evi              REAL,
+            lswi             REAL,
+            PRIMARY KEY (id_ciclo, fecha)
+            FOREIGN KEY (id_ciclo) REFERENCES produccion_acumulada_ciclo(id_ciclo)
+            FOREIGN KEY (id_parcela) REFERENCES parcelas_vigentes(id_parcela)
+        );
+    """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS predicciones_ventana (
+            id_prediccion              INTEGER NOT NULL,
+            id_ciclo                   INTEGER NOT NULL,
+            id_parcela                 INTEGER NOT NULL,
+            ventana                    TEXT    NOT NULL,
+            fecha_ventana              DATE    NOT NULL,
+            lswi_max_efectivo_usado    REAL,
+            gpp_acumulado              REAL,
+            npp_acumulado              REAL,
+            rendimiento_estimado_qq_ha       REAL,
+            rendimiento_estimado_qq_parcela  REAL,
+            fecha_congelamiento        TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (id_prediccion AUTOINCREMENT),
+            UNIQUE (id_ciclo, ventana),
+            CHECK (ventana IN ('T1', 'T2', 'T3', 'EOS')),
+            FOREIGN KEY (id_ciclo) REFERENCES produccion_acumulada_ciclo(id_ciclo),
+            FOREIGN KEY (id_parcela) REFERENCES parcelas_vigentes(id_parcela)
+        );
+    """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS climatologia_diaria (
+            id_region           INTEGER NOT NULL DEFAULT 1,
+            variable            TEXT    NOT NULL,
+            dia_anio            INTEGER NOT NULL,
+            valor_climatologico REAL    NOT NULL,
+            anio_min_incluido   INTEGER NOT NULL,
+            anio_max_incluido   INTEGER NOT NULL,
+            fecha_calculo       TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (id_region, variable, dia_anio),
+            CHECK (dia_anio BETWEEN 1 AND 366)
+        );
+    """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS series_extrapoladas_ventana (
+            id_prediccion    INTEGER NOT NULL,
+            fecha            DATE    NOT NULL,
+            evi_extrapolado  REAL,
+            lswi_extrapolado REAL,
+            PRIMARY KEY (id_prediccion, fecha),
+            FOREIGN KEY (id_prediccion) REFERENCES predicciones_ventana(id_prediccion)
+                ON DELETE CASCADE
+        );
+    """)
+
+
 def seeding(rutaGJSON: str) -> None:
-    """
-    Inicializa el GeoPackage: carga las parcelas y crea las tablas auxiliares.
-
-    Orden obligatorio en Windows:
-    1. Escribir geometrías con geopandas/pyogrio (handle GDAL).
-    2. Abrir SQLite DESPUÉS de que GDAL liberó el archivo.
-    GDAL y SQLite no pueden tener el archivo abierto simultáneamente para escritura.
-
-    WAL mode se activa aquí para que las escrituras futuras del pipeline
-    no bloqueen las lecturas de Streamlit.
-    """
-    # 1. Escribir geometrías — GDAL abre y cierra el archivo aquí
     actualizar_gpkg(rutaGJSON, "replace")
-
-    # 2. Abrir SQLite solo después de que GDAL liberó el archivo.
     with closing(get_connection_raw()) as conn:
         with conn:
-            conn.execute("""
-                CREATE TABLE IF NOT EXISTS series_diarias_vpm (
-                    id_parcela                  INTEGER NOT NULL,
-                    fecha                       DATE    NOT NULL,
-                    evi_crudo                   REAL,
-                    lswi_crudo                  REAL,
-                    temperatura_diaria_promedio REAL,
-                    radiacion_total_promedio    REAL,
-                    gpp_diario                  REAL,
-                    PRIMARY KEY (id_parcela, fecha),
-                    FOREIGN KEY (id_parcela) REFERENCES parcelas_vigentes(id_parcela)
-                );
-            """)
-            conn.execute("""
-                CREATE TABLE IF NOT EXISTS lswi_maximo (
-                    id_parcela        INTEGER NOT NULL,
-                    lswi_max          REAL,
-                    temporada         TEXT,
-                    PRIMARY KEY (id_parcela, temporada),
-                    FOREIGN KEY (id_parcela) REFERENCES parcelas_vigentes(id_parcela)
-                );
-            """)
-            conn.execute("""
-                CREATE TABLE IF NOT EXISTS produccion_acumulada_ciclo (
-                    id_ciclo          INTEGER PRIMARY KEY AUTOINCREMENT,
-                    id_parcela        INTEGER NOT NULL,
-                    temporada         TEXT NOT NULL,
-                    lswi_max          REAL,
-                    lswi_max_efectivo REAL,
-                    fecha_inicio      DATE,
-                    sos               DATE,
-                    t1                DATE,
-                    t2                DATE,
-                    t3                DATE,
-                    eos               DATE,
-                    fecha_fin         DATE,
-                    rendimiento       REAL,
-                    produccion_total  REAL,
-                    estado_ciclo      TEXT NOT NULL DEFAULT 'candidato',
-                    CHECK (estado_ciclo IN ('candidato', 'activo', 'finalizado')),
-                    CHECK (temporada IN ('primera', 'postrera')),
-                    FOREIGN KEY (id_parcela) REFERENCES parcelas_vigentes(id_parcela)
-                );
-            """)
-            conn.execute("""
-                CREATE UNIQUE INDEX IF NOT EXISTS ux_ciclo_unico_no_finalizado
-                    ON produccion_acumulada_ciclo (id_parcela, temporada)
-                    WHERE estado_ciclo IN ('candidato', 'activo');
-            """)
-            conn.execute("""
-                CREATE TABLE IF NOT EXISTS indices_suavizados(
-                    id_ciclo         INTEGER NOT NULL,
-                    fecha            DATE    NOT NULL,
-                    id_parcela       INTEGER NOT NULL,
-                    evi              REAL,
-                    lswi             REAL,
-                    PRIMARY KEY (id_ciclo, fecha)
-                    FOREIGN KEY (id_ciclo) REFERENCES produccion_acumulada_ciclo(id_ciclo)
-                    FOREIGN KEY (id_parcela) REFERENCES parcelas_vigentes(id_parcela)
-                );
-            """)
-            conn.execute("""
-                CREATE TABLE IF NOT EXISTS predicciones_ventana (
-                    id_prediccion              INTEGER NOT NULL,
-                    id_ciclo                   INTEGER NOT NULL,
-                    id_parcela                 INTEGER NOT NULL,
-                    ventana                    TEXT    NOT NULL,
-                    fecha_ventana              DATE    NOT NULL,
-                    lswi_max_efectivo_usado    REAL,
-                    gpp_acumulado              REAL,
-                    npp_acumulado              REAL,
-                    rendimiento_estimado_qq_ha       REAL,
-                    rendimiento_estimado_qq_parcela  REAL,
-                    fecha_congelamiento        TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                    PRIMARY KEY (id_prediccion AUTOINCREMENT),
-                    UNIQUE (id_ciclo, ventana),
-                    CHECK (ventana IN ('T1', 'T2', 'T3', 'EOS')),
-                    FOREIGN KEY (id_ciclo) REFERENCES produccion_acumulada_ciclo(id_ciclo),
-                    FOREIGN KEY (id_parcela) REFERENCES parcelas_vigentes(id_parcela)
-                );
-            """)
-            conn.execute("""
-                CREATE TABLE IF NOT EXISTS climatologia_diaria (
-                    id_region           INTEGER NOT NULL DEFAULT 1,
-                    variable            TEXT    NOT NULL,
-                    dia_anio            INTEGER NOT NULL,
-                    valor_climatologico REAL    NOT NULL,
-                    anio_min_incluido   INTEGER NOT NULL,
-                    anio_max_incluido   INTEGER NOT NULL,
-                    fecha_calculo       TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                    PRIMARY KEY (id_region, variable, dia_anio),
-                    CHECK (dia_anio BETWEEN 1 AND 366)
-                );
-            """)
-            conn.execute("""
-                CREATE TABLE IF NOT EXISTS series_extrapoladas_ventana (
-                    id_prediccion    INTEGER NOT NULL,
-                    fecha            DATE    NOT NULL,
-                    evi_extrapolado  REAL,
-                    lswi_extrapolado REAL,
-                    PRIMARY KEY (id_prediccion, fecha),
-                    FOREIGN KEY (id_prediccion) REFERENCES predicciones_ventana(id_prediccion)
-                        ON DELETE CASCADE
-                );
-            """)
-
+            _crear_tablas_sql(conn)
     print("Seeding completado.")
 
 
-def crear_bd_pruebas(geojson_path: str) -> None:
-    """
-    Crea el GeoPackage de pruebas (pipeline_pruebas.gpkg) a partir de un GeoJSON,
-    ejecuta seeding (escribe geometrías + crea tablas) y cambia el modo activo
-    a PRUEBAS.
+def validar_gpkg(draft_path: str | Path) -> Path:
+    """Copia un GPKG borrador (de delineate_anything/data/delineated/)
+    a ROOT/data/ y ejecuta seeding (crea capa parcelas_vigentes + tablas SQL).
 
-    Parámetros
-    ----------
-    geojson_path : str
-        Ruta al archivo GeoJSON con las parcelas.
+    El GPKG destino obtiene el mismo nombre que el borrador.
+
+    Retorna la ruta al GPKG validado.
     """
+    draft = Path(draft_path)
+    if not draft.exists():
+        raise FileNotFoundError(f"Borrador no encontrado: {draft}")
+    destino = ROOT / "data" / draft.name
+
+    actualizar_gpkg(
+        draft, "replace", gpkg_path=destino,
+        source_layer="parcelas_vigentes", layer_name="parcelas_vigentes",
+    )
+
+    conn = sqlite3.connect(str(destino))
+    try:
+        with conn:
+            _crear_tablas_sql(conn)
+    finally:
+        conn.close()
+
+    print(f"✅ GPKG validado: {destino}")
+    return destino
+
+
+def crear_bd_pruebas(geojson_path: str) -> None:
     r = Path(geojson_path)
     if not r.exists():
         print(f"  ❌  Archivo no encontrado: {r.resolve()}")
@@ -260,9 +237,9 @@ def crear_bd_pruebas(geojson_path: str) -> None:
     if GPKG_PRUEBAS_PATH.exists():
         GPKG_PRUEBAS_PATH.unlink()
 
-    from utils.conexionDB import set_db_mode
+    from utils.conexionDB import set_db_path
 
-    set_db_mode("pruebas")
+    set_db_path(GPKG_PRUEBAS_PATH)
     seeding(geojson)
     print(f"\n  ✅  BD de pruebas creada: {GPKG_PRUEBAS_PATH}")
     print("  📁  Modo cambiado a: PRUEBAS")
