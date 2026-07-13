@@ -79,10 +79,9 @@ def _agregar_css_no_select(mapa: folium.Map) -> None:
 def _agregar_leyenda_flotante(mapa: folium.Map, modo_color: str) -> None:
     if modo_color == "cultivo":
         items = ""
-        for cultivo, color in COLORES_CULTIVO.items():
-            if cultivo not in ("maiz", "otro"):
-                continue
-            etiqueta = cultivo.replace("_", " ").title()
+        for ciclo_key in ("primera", "postrera"):
+            color = COLORES_CICLO[ciclo_key]
+            etiqueta = ciclo_key.title()
             items += f"""
             <div style="display:flex; align-items:center; gap:.6rem; padding:.2rem 0;">
                 <div style="width:14px;height:14px;border-radius:3px;background:{color};flex-shrink:0;"></div>
@@ -94,7 +93,7 @@ def _agregar_leyenda_flotante(mapa: folium.Map, modo_color: str) -> None:
                     padding:.7rem 1rem;font-size:.85rem;color:#eee;min-width:120px;
                     box-shadow:0 4px 15px rgba(0,0,0,.5);backdrop-filter:blur(4px);
                     font-family:system-ui,-apple-system,sans-serif;">
-            <div style="font-weight:600;margin-bottom:.4rem;font-size:.9rem;border-bottom:1px solid #2d3139;padding-bottom:.3rem;">Leyenda</div>
+            <div style="font-weight:600;margin-bottom:.4rem;font-size:.9rem;border-bottom:1px solid #2d3139;padding-bottom:.3rem;">Temporada</div>
             {items}
         </div>"""
     else:
@@ -160,16 +159,6 @@ def render_mapa_parcelas(
         st.session_state["centrar_revision"] = 0
     if "mapa_centrar_pendiente" not in st.session_state:
         st.session_state["mapa_centrar_pendiente"] = False
-
-    # ── Botón centrar área de estudio ──────────────────────────────────────────
-    if st.button(
-        "🎯 Centrar en área de estudio",
-        help="Ajusta el mapa para mostrar el Valle de Comayagua completo.",
-        key="btn_centrar_mapa",
-        use_container_width=False,
-    ):
-        st.session_state["mapa_centrar_pendiente"] = True
-        st.session_state["centrar_revision"] += 1
 
     # ── Cargar datos ───────────────────────────────────────────────────────────
     gdf_municipio = cargar_municipio()
@@ -284,40 +273,57 @@ def render_mapa_parcelas(
     # ── Botón de pantalla completa ───────────────────────────────────────────────
     Fullscreen(position="topleft", title="Pantalla completa", title_cancel="Salir de pantalla completa").add_to(mapa)
 
-    # ── Barra de estado ────────────────────────────────────────────────────────
+    # ── Barra de estado + botón centrar ────────────────────────────────────────
     n_poligonos = len(gdf_parcelas) if not gdf_parcelas.empty else 0
 
-    if es_externo:
-        label_capa = nombre_externo or "Capa externa"
-        st.markdown(
-            f"""
-            <div style='background:#1a1d23; border:1px solid #2d3139; border-radius:6px;
-                        padding:.5rem .9rem; margin-bottom:.5rem; font-size:.85rem;
-                        display:flex; gap:1.5rem; flex-wrap:wrap;'>
-                <span>📁 <b>{label_capa}</b></span>
-                <span>🗺️ Polígonos: <b>{n_poligonos}</b></span>
-                <span>✏️ Edición activa</span>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
-    else:
-        modo_label = (
-            "Cultivo clasificado" if modo_color == "cultivo"
-            else f"Rendimiento estimado (qq/ha) — ventana {ventana}"
-        )
-        st.markdown(
-            f"""
-            <div style='background:#1a1d23; border:1px solid #2d3139; border-radius:6px;
-                        padding:.5rem .9rem; margin-bottom:.5rem; font-size:.85rem;
-                        display:flex; gap:1.5rem; flex-wrap:wrap;'>
-                <span>🎨 <b>{modo_label}</b></span>
-                <span>📅 Ciclo: <b>{ciclo.title()}</b></span>
-                <span>🗺️ Parcelas: <b>{n_poligonos}</b></span>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
+    col_info, col_btn = st.columns([3, 1], vertical_alignment="center")
+    st.markdown(
+        "<style>div[data-testid='stHorizontalBlock'] > div:nth-child(2) button { transform:translateY(3px) }</style>",
+        unsafe_allow_html=True,
+    )
+
+    with col_info:
+        if es_externo:
+            label_capa = nombre_externo or "Capa externa"
+            st.markdown(
+                f"""
+                <div style='background:#1a1d23; border:1px solid #2d3139; border-radius:6px;
+                            padding:.5rem .9rem; margin-bottom:.5rem; font-size:.85rem;
+                            display:flex; gap:1.5rem; flex-wrap:wrap;'>
+                    <span>📁 <b>{label_capa}</b></span>
+                    <span>🗺️ Polígonos: <b>{n_poligonos}</b></span>
+                    <span>✏️ Edición activa</span>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+        else:
+            modo_label = (
+                "Temporada" if modo_color == "cultivo"
+                else f"Rendimiento estimado (qq/ha) — ventana {ventana}"
+            )
+            st.markdown(
+                f"""
+                <div style='background:#1a1d23; border:1px solid #2d3139; border-radius:6px;
+                            padding:.5rem .9rem; margin-bottom:.5rem; font-size:.85rem;
+                            display:flex; gap:1.5rem; flex-wrap:wrap;'>
+                    <span>🎨 <b>{modo_label}</b></span>
+                    <span>📅 Ciclo: <b>{ciclo.title()}</b></span>
+                    <span>🗺️ Parcelas: <b>{n_poligonos}</b></span>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+
+    with col_btn:
+        if st.button(
+            "🎯 Centrar en área de estudio",
+            help="Ajusta el mapa para mostrar el Valle de Comayagua completo.",
+            key="btn_centrar_mapa",
+            use_container_width=True,
+        ):
+            st.session_state["mapa_centrar_pendiente"] = True
+            st.session_state["centrar_revision"] += 1
 
     # ── Renderizado con st_folium ──────────────────────────────────────────────
     returned = ["last_object_clicked", "center", "zoom"]

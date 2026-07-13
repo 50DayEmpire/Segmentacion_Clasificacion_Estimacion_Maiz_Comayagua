@@ -121,6 +121,7 @@ def _crear_tablas_sql(conn: sqlite3.Connection) -> None:
             fecha_fin         DATE,
             rendimiento       REAL,
             produccion_total  REAL,
+            clasificacion_final TEXT,
             estado_ciclo      TEXT NOT NULL DEFAULT 'candidato',
             CHECK (estado_ciclo IN ('candidato', 'activo', 'finalizado')),
             CHECK (temporada IN ('primera', 'postrera')),
@@ -154,8 +155,12 @@ def _crear_tablas_sql(conn: sqlite3.Connection) -> None:
             lswi_max_efectivo_usado    REAL,
             gpp_acumulado              REAL,
             npp_acumulado              REAL,
-            rendimiento_estimado_qq_ha       REAL,
-            rendimiento_estimado_qq_parcela  REAL,
+            rendimiento_estimado_qq_ha      REAL,
+            rendimiento_estimado_qq_parcela REAL,
+            score_pearson                   REAL,
+            score_magnitud_pendiente        REAL,
+            score_compuesto                 REAL,
+            cultivo_predicho                TEXT,
             fecha_congelamiento        TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
             PRIMARY KEY (id_prediccion AUTOINCREMENT),
             UNIQUE (id_ciclo, ventana),
@@ -186,6 +191,22 @@ def _crear_tablas_sql(conn: sqlite3.Connection) -> None:
             PRIMARY KEY (id_prediccion, fecha),
             FOREIGN KEY (id_prediccion) REFERENCES predicciones_ventana(id_prediccion)
                 ON DELETE CASCADE
+        );
+    """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS patron_referencia_fenologico (
+            id_patron         INTEGER NOT NULL,
+            subtipo           TEXT    NOT NULL,
+            dia_post_sos      INTEGER NOT NULL,
+            evi_promedio      REAL    NOT NULL,
+            evi_desviacion    REAL,
+            n_muestras        INTEGER NOT NULL,
+            ids_parcelas_usadas TEXT  NOT NULL, 
+            fecha_construccion TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            version           INTEGER NOT NULL DEFAULT 1,
+            PRIMARY KEY (id_patron AUTOINCREMENT),
+            UNIQUE (subtipo, dia_post_sos, version),
+            CHECK (subtipo IN ('grano_rapido', 'grano_lento'))
         );
     """)
 

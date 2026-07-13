@@ -78,7 +78,7 @@ RENDIMIENTO_MIN_QQ_HA = 0
 RENDIMIENTO_MAX_QQ_HA = 120
 
 # ── Parámetros del mapa Folium ─────────────────────────────────────────────────
-MAPA_CENTRO_LAT  = 14.477    # centro geográfico del municipio de Comayagua
+MAPA_CENTRO_LAT  = 14.377    # centro geográfico del municipio de Comayagua
 MAPA_CENTRO_LON  = -87.641
 MAPA_ZOOM_INICIO = 11        # zoom adecuado para ver el municipio completo
 MAPA_TILES       = "CartoDB dark_matter"

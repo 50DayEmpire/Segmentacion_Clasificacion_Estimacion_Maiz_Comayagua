@@ -6,6 +6,7 @@ No contiene lógica de consulta ni de renderizado de gráficas.
 """
 import streamlit as st
 from config import CICLOS, VENTANAS, COLORES_CICLO
+from utils.conexionDB import get_db_path
 
 
 def _encabezado_sidebar() -> None:
@@ -51,29 +52,20 @@ def render_filtros_parcelas() -> dict:
         help="T1 = inicio, T2 = floración, T3 = llenado de grano.",
     )
 
-    st.markdown("---")
-    modo_color = st.radio(
-        "Colorear parcelas por",
-        options=["cultivo", "rendimiento"],
-        format_func=lambda x: "Cultivo clasificado" if x == "cultivo" else "Rendimiento (qq/ha)",
-        horizontal=False,
-        help="Elige la variable que define el color de cada polígono.",
-    )
-
-    # Indicador visual del ciclo activo
-    color = COLORES_CICLO[ciclo]
+    from pathlib import Path
+    bd_activa = Path(get_db_path()).name
     st.markdown(
         f"""
         <div style='margin-top:1rem; padding:.5rem .8rem;
-                    border-left:4px solid {color}; background:#1a1d23;
+                    border-left:4px solid #2ecc71; background:#1a1d23;
                     border-radius:4px; font-size:.85rem;'>
-            Ciclo activo: <b style='color:{color};'>{etiqueta_ciclo}</b>
+            🟢 BD activa: <b style='color:#2ecc71;'>{bd_activa}</b>
         </div>
         """,
         unsafe_allow_html=True,
     )
 
-    return {"ciclo": ciclo, "ventana": ventana, "modo_color": modo_color}
+    return {"ciclo": ciclo, "ventana": ventana, "modo_color": "cultivo"}
 
 
 def render_filtros_series() -> dict:
