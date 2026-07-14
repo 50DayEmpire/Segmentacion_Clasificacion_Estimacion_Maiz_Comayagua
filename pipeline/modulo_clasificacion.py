@@ -1,6 +1,17 @@
+from __future__ import annotations
+
+import logging
+from contextlib import closing
+from datetime import date
+
 from scipy.stats import pearsonr
 import pandas as pd
 import numpy as np
+from tqdm import tqdm
+
+from utils.conexionDB import get_connection_raw
+
+_log_clf = logging.getLogger(__name__)
 
 def cargar_patron_desde_bd(conn, subtipo, version=None):
     query = """
@@ -15,40 +26,94 @@ def cargar_patron_desde_bd(conn, subtipo, version=None):
     df = pd.read_sql(query, conn, params=params)
     return df["evi_promedio"].values
 
-def persistir_clasificacion_v2(conn, resultado, id_ciclo, umbral_maiz=70, umbral_no_maiz=30):
-    if resultado["estado"] != "evaluado":
-        return  # no hay nada que persistir si está fuera de ventana o sin patrón
-
-    score = resultado["score_compuesto"]
+def _score_a_label(score):
+    """Convierte score_compuesto a etiqueta de clasificación."""
     if pd.isna(score):
-        cultivo_predicho = "incierto"
-    elif score >= umbral_maiz:
-        cultivo_predicho = "maiz"
-    elif score <= umbral_no_maiz:
-        cultivo_predicho = "no_maiz"
-    else:
-        cultivo_predicho = "incierto"
+        return "Incierto"
+    if score >= 70:
+        return "Maíz"
+    if score >= 30:
+        return "Maíz - baja probabilidad"
+    return "Otro"
 
-    dia = resultado["dia_post_sos"]
-    ventana = "T1" if dia <= 30 else ("T2" if dia <= 60 else "T3")
+def persistir_clasificacion_v2(conn, resultado, id_ciclo, ventana=None):
+    """
+    Persiste los scores de clasificación en ``predicciones_ventana``
+    y, si el resultado está evaluado, actualiza ``clasificacion_final``
+    en ``produccion_acumulada_ciclo``.
+
+    Parámetros
+    ----------
+    conn : sqlite3.Connection
+        Conexión a la BD.
+    resultado : dict
+        Salida de ``clasificar_parcela_actual()``.
+    id_ciclo : int
+        Identificador del ciclo.
+    ventana : str | None
+        Ventana de predicción asociada (T1/T2/T3/EOS).
+        Si es ``None`` se infiere de ``dia_post_sos``.
+    """
+    if resultado["estado"] != "evaluado":
+        _log_clf.debug("Ciclo %s: estado '%s', no se persiste", id_ciclo, resultado["estado"])
+        return
+
+    score = resultado.get("score_compuesto")
+    label = _score_a_label(score)
+    dia = resultado.get("dia_post_sos")
+
+    if ventana is None:
+        ventana = "T1" if dia <= 30 else ("T2" if dia <= 60 else "T3")
 
     with conn:
-        conn.execute(
-            """
-            INSERT INTO clasificacion_cultivo_ciclo
-                (id_ciclo, id_parcela, ventana, dia_post_sos, patron_usado,
-                 score_forma_pearson, score_magnitud_pendiente, score_compuesto, cultivo_predicho)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT (id_ciclo, ventana) DO UPDATE SET
-                score_compuesto = excluded.score_compuesto,
-                cultivo_predicho = excluded.cultivo_predicho,
-                score_forma_pearson = excluded.score_forma_pearson,
-                score_magnitud_pendiente = excluded.score_magnitud_pendiente,
-                fecha_calculo = CURRENT_TIMESTAMP
-            """,
-            (id_ciclo, resultado["id_parcela"], ventana, dia, resultado["patron_usado"],
-             resultado["r_forma"], resultado["pendiente_obs"], score, cultivo_predicho),
+        cur = conn.execute(
+            """UPDATE predicciones_ventana
+               SET score_pearson = ?,
+                   score_magnitud_pendiente = ?,
+                   score_compuesto = ?,
+                   cultivo_predicho = ?
+               WHERE id_ciclo = ? AND ventana = ?""",
+            (
+                resultado.get("r_forma"),
+                resultado.get("pendiente_obs"),
+                score,
+                label,
+                id_ciclo,
+                ventana,
+            ),
         )
+
+        if cur.rowcount == 0:
+            conn.execute(
+                """INSERT INTO predicciones_ventana
+                   (id_ciclo, id_parcela, ventana, fecha_ventana,
+                    score_pearson, score_magnitud_pendiente,
+                    score_compuesto, cultivo_predicho, fecha_congelamiento)
+                   VALUES (?, ?, ?, DATE('now'),
+                           ?, ?, ?, ?, CURRENT_TIMESTAMP)""",
+                (
+                    id_ciclo,
+                    resultado.get("id_parcela"),
+                    ventana,
+                    resultado.get("r_forma"),
+                    resultado.get("pendiente_obs"),
+                    score,
+                    label,
+                ),
+            )
+
+        conn.execute(
+            "UPDATE produccion_acumulada_ciclo SET clasificacion_final = ? WHERE id_ciclo = ?",
+            (label, id_ciclo),
+        )
+
+    _log_clf.info(
+        "[CLF] Ciclo %s → %s (score=%.1f%%, r=%.3f, pend=%.4f, ventana=%s)",
+        id_ciclo, label, score if pd.notna(score) else 0,
+        resultado.get("r_forma") or 0,
+        resultado.get("pendiente_obs") or 0,
+        ventana,
+    )
 
 def correlacion_truncada(id_parcela, sos, t_actual, mu_ref, df_evi):
     col = f"id_{id_parcela}"
@@ -132,30 +197,206 @@ def cargar_mediana_pendiente_desde_bd(conn, subtipo, dia, version=None):
     return None if row.empty else row["mediana_pendiente_verdeo"].iloc[0]
 
 
+def seed_clasificacion(
+    conn,
+    temporada: str | None = None,
+    ids_parcelas: list[int] | None = None,
+    fecha_hoy: date | None = None,
+    logger: logging.Logger | None = None,
+) -> dict:
+    """
+    Itera sobre ciclos sin ``clasificacion_final``, carga EVI desde BD,
+    ejecuta ``clasificar_parcela_actual()`` y persiste los scores.
+
+    Parámetros
+    ----------
+    conn : sqlite3.Connection
+    temporada : str | None
+        Filtrar por temporada (``"primera"`` / ``"postrera"``).
+        ``None`` = todas las temporadas.
+    ids_parcelas : list[int] | None
+        Filtrar por parcelas específicas.  ``None`` = todas.
+    fecha_hoy : date | None
+        Fecha de evaluación.  ``None`` = ``date.today()``.
+    logger : logging.Logger | None
+        Logger externo (ej. el del worker).  ``None`` = usa el interno.
+
+    Retorna
+    -------
+    dict
+        ``{"total": int, "clasificados": int, "fuera_ventana": int,
+          "sin_patron": int, "sin_evi": int, "errores": list[str]}``
+    """
+    from pipeline.ingesta import cargar_indices_desde_bd
+    from pipeline.modulo_vpm import preprocesar_indices_vpm
+
+    log = logger or _log_clf
+    fecha_hoy = fecha_hoy or date.today()
+
+    params: list = []
+    where_clauses: list[str] = ["pac.clasificacion_final IS NULL",
+                                 "pac.sos IS NOT NULL"]
+    if temporada:
+        where_clauses.append("pac.temporada = ?")
+        params.append(temporada)
+    if ids_parcelas:
+        placeholders = ",".join("?" for _ in ids_parcelas)
+        where_clauses.append(f"pac.id_parcela IN ({placeholders})")
+        params.extend(ids_parcelas)
+
+    sql = f"""
+        WITH ultima_ventana AS (
+            SELECT id_ciclo, ventana, fecha_ventana,
+                   ROW_NUMBER() OVER (
+                       PARTITION BY id_ciclo
+                       ORDER BY
+                           CASE WHEN score_compuesto IS NOT NULL THEN 0 ELSE 1 END,
+                           CASE ventana
+                               WHEN 'T1'  THEN 1
+                               WHEN 'T2'  THEN 2
+                               WHEN 'T3'  THEN 3
+                               WHEN 'EOS' THEN 4
+                           END DESC
+                   ) AS rn
+            FROM predicciones_ventana
+        )
+        SELECT pac.id_ciclo, pac.id_parcela, pac.sos, pac.temporada,
+               uv.ventana AS ultima_ventana
+        FROM produccion_acumulada_ciclo pac
+        JOIN ultima_ventana uv ON uv.id_ciclo = pac.id_ciclo AND uv.rn = 1
+        WHERE {' AND '.join(where_clauses)}
+        ORDER BY pac.id_ciclo
+    """
+    ciclos = conn.execute(sql, params).fetchall()
+
+    if not ciclos:
+        log.info("[CLF] No se encontraron ciclos pendientes de clasificación.")
+        return {"total": 0, "clasificados": 0, "fuera_ventana": 0,
+                "sin_patron": 0, "sin_evi": 0, "errores": []}
+
+    log.info("[CLF] %s ciclo(s) pendiente(s) de clasificación.", len(ciclos))
+
+    clasificados = 0
+    fuera_ventana = 0
+    sin_patron = 0
+    sin_evi = 0
+    errores: list[str] = []
+    _cache_proc: dict[int, pd.DataFrame] = {}
+
+    for row in tqdm(ciclos, desc="Clasificando ciclos"):
+        id_ciclo, id_parcela, sos_str, *_ = row
+
+        if id_parcela not in _cache_proc:
+            try:
+                dfs = cargar_indices_desde_bd(ids_parcelas=[id_parcela])
+            except ValueError:
+                log.debug("[CLF] Ciclo %s: sin EVI en BD (ValueError)", id_ciclo)
+                sin_evi += 1
+                continue
+            except Exception as exc:
+                errores.append(f"Ciclo {id_ciclo}: error cargando índices – {exc}")
+                log.warning("[CLF] Ciclo %s: error cargando índices – %s", id_ciclo, exc)
+                continue
+
+            if dfs.get("EVI") is None or dfs["EVI"].empty:
+                log.debug("[CLF] Ciclo %s: DataFrame EVI vacío", id_ciclo)
+                sin_evi += 1
+                continue
+
+            try:
+                dfs_proc = preprocesar_indices_vpm(dfs)
+            except Exception as exc:
+                errores.append(f"Ciclo {id_ciclo}: error preprocesando índices – {exc}")
+                log.warning("[CLF] Ciclo %s: error preprocesando índices – %s", id_ciclo, exc)
+                continue
+
+            _cache_proc[id_parcela] = dfs_proc["EVI"]
+
+        df_evi = _cache_proc[id_parcela]
+        sos_fecha = pd.Timestamp(sos_str)
+        try:
+            res = clasificar_parcela_actual(
+                conn, id_parcela, sos_fecha, df_evi,
+                fecha_evaluacion=pd.Timestamp(fecha_hoy),
+            )
+        except Exception as exc:
+            errores.append(f"Ciclo {id_ciclo}: error clasificando – {exc}")
+            log.warning("[CLF] Ciclo %s: error clasificando – %s", id_ciclo, exc)
+            continue
+
+        if res["estado"] == "evaluado":
+            try:
+                persistir_clasificacion_v2(conn, res, id_ciclo)
+                clasificados += 1
+            except Exception as exc:
+                errores.append(
+                    f"Ciclo {id_ciclo}: error persistiendo – {exc}"
+                )
+                log.warning("[CLF] Ciclo %s: error persistiendo – %s", id_ciclo, exc)
+        elif res["estado"] == "fuera_de_ventana":
+            fuera_ventana += 1
+            log.debug("[CLF] Ciclo %s: %s", id_ciclo, res.get("motivo", "fuera de ventana"))
+        elif res["estado"] == "sin_patron_disponible":
+            sin_patron += 1
+            log.warning("[CLF] Ciclo %s: sin patrón de referencia disponible", id_ciclo)
+        else:
+            sin_evi += 1
+            log.debug("[CLF] Ciclo %s: estado '%s' – sin datos", id_ciclo, res["estado"])
+
+    log.info(
+        "[CLF] Seed completado: %d clasificados, %d fuera de ventana, "
+        "%d sin patrón, %d sin EVI, %d errores",
+        clasificados, fuera_ventana, sin_patron, sin_evi, len(errores),
+    )
+
+    return {
+        "total": len(ciclos),
+        "clasificados": clasificados,
+        "fuera_ventana": fuera_ventana,
+        "sin_patron": sin_patron,
+        "sin_evi": sin_evi,
+        "errores": errores,
+    }
+
+
 def clasificar_parcela_actual(conn, id_parcela, sos_fecha, df_evi, fecha_evaluacion=None):
     """Función principal de la plataforma: evalúa una parcela contra ambos patrones y devuelve el mejor score."""
     fecha_evaluacion = fecha_evaluacion or pd.Timestamp.today().normalize()
     t_actual = (fecha_evaluacion - sos_fecha).days
 
     if t_actual < 30:
+        _log_clf.debug("[CLF] Parcela %s: %d días post-SOS, no alcanza mínimo 30",
+                       id_parcela, t_actual)
         return {"estado": "fuera_de_ventana", "motivo": f"día {t_actual} < 30, aún no alcanza ventana mínima"}
     if t_actual > 60:
-        t_actual = 60  # se evalúa con la ventana completa disponible, no se extrapola más allá
+        _log_clf.debug("[CLF] Parcela %s: t_actual=%d, capado a 60", id_parcela, t_actual)
+        t_actual = 60
 
     resultados = {}
     for subtipo in ["grano_rapido", "grano_lento"]:
         mu_ref = cargar_patron_desde_bd(conn, subtipo)
         mediana_pend = cargar_mediana_pendiente_desde_bd(conn, subtipo, t_actual)
         if mu_ref is None or len(mu_ref) == 0 or mediana_pend is None:
+            _log_clf.debug("[CLF] Parcela %s: sin datos para patrón '%s' (t=%d)",
+                           id_parcela, subtipo, t_actual)
             continue
         res = evaluar_score_v3(id_parcela, sos_fecha, t_actual, df_evi, mu_ref, mediana_pend)
         resultados[subtipo] = res
+        _log_clf.debug("[CLF] Parcela %s, patrón '%s': r=%.3f, pend=%.4f, score=%.1f",
+                       id_parcela, subtipo,
+                       res.get("r_forma") or 0,
+                       res.get("pendiente_obs") or 0,
+                       res.get("score_compuesto") or 0)
 
     if not resultados:
+        _log_clf.warning("[CLF] Parcela %s: ningún patrón disponible para clasificar", id_parcela)
         return {"estado": "sin_patron_disponible"}
 
     mejor_subtipo = max(resultados, key=lambda k: resultados[k]["score_compuesto"] or 0)
     mejor = resultados[mejor_subtipo]
+
+    _log_clf.info("[CLF] Parcela %s: clasificado con '%s' (score=%.1f%%)",
+                  id_parcela, mejor_subtipo, mejor.get("score_compuesto") or 0)
 
     return {
         "estado": "evaluado",

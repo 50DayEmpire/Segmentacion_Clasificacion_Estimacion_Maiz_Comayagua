@@ -182,7 +182,9 @@ def cargar_predicciones_ciclo(id_ciclo: int) -> pd.DataFrame:
     -------
     pd.DataFrame
         Columnas: ventana, fecha_ventana, gpp_acumulado, npp_acumulado,
-        rendimiento_estimado_qq_ha, rendimiento_estimado_qq_parcela.
+        rendimiento_estimado_qq_ha, rendimiento_estimado_qq_parcela,
+        score_compuesto, score_pearson, score_magnitud_pendiente,
+        cultivo_predicho.
     """
     from contextlib import closing
     from utils.conexionDB import get_connection_raw
@@ -190,7 +192,9 @@ def cargar_predicciones_ciclo(id_ciclo: int) -> pd.DataFrame:
     sql = """
         SELECT id_prediccion, ventana, fecha_ventana,
                gpp_acumulado, npp_acumulado,
-               rendimiento_estimado_qq_ha, rendimiento_estimado_qq_parcela
+               rendimiento_estimado_qq_ha, rendimiento_estimado_qq_parcela,
+               score_compuesto, score_pearson, score_magnitud_pendiente,
+               cultivo_predicho
         FROM predicciones_ventana
         WHERE id_ciclo = ?
         ORDER BY ventana
@@ -304,10 +308,12 @@ def cargar_ciclos_no_finalizados(temporada: str) -> pd.DataFrame:
                    rendimiento_estimado_qq_ha,
                    ROW_NUMBER() OVER (
                        PARTITION BY id_ciclo
-                       ORDER BY CASE ventana
-                           WHEN 'EOS' THEN 4 WHEN 'T3' THEN 3
-                           WHEN 'T2' THEN 2 WHEN 'T1' THEN 1
-                       END DESC
+                       ORDER BY
+                           CASE WHEN score_compuesto IS NOT NULL THEN 0 ELSE 1 END,
+                           CASE ventana
+                               WHEN 'EOS' THEN 4 WHEN 'T3' THEN 3
+                               WHEN 'T2' THEN 2 WHEN 'T1' THEN 1
+                           END DESC
                    ) AS rn
             FROM predicciones_ventana
         )

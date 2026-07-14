@@ -778,6 +778,32 @@ def ejecutar_prediccion_ventana(
     area_ha = _obtener_area_ha(id_parcela)
     yield_qq_parcela = yield_qq_ha * area_ha if area_ha else None
 
+    # ── Clasificación fenológica ──────────────────────────────────────────────
+    score_pearson_val = None
+    score_pend_val = None
+    score_comp_val = None
+    cultivo_label = None
+
+    try:
+        from pipeline.modulo_clasificacion import clasificar_parcela_actual
+        with closing(get_connection_raw()) as conn_clf:
+            res_clf = clasificar_parcela_actual(
+                conn_clf, id_parcela, sos_ts, dfs_vpm["EVI"],
+                fecha_evaluacion=pd.Timestamp(fecha_ventana),
+            )
+        if res_clf["estado"] == "evaluado":
+            score_pearson_val = float(res_clf["r_forma"])
+            score_pend_val = float(res_clf["pendiente_obs"])
+            score_comp_val = float(res_clf["score_compuesto"])
+        _log_pred.debug(
+            "[CLF] ciclo=%d ventana=%s pearson=%.4f pend=%.4f score=%.1f",
+            id_ciclo, ventana,
+            score_pearson_val or 0, score_pend_val or 0, score_comp_val or 0,
+        )
+    except Exception as exc:
+        _log_pred.warning("[CLF] Error clasificando ciclo %s ventana %s: %s",
+                          id_ciclo, ventana, exc)
+
     id_prediccion = None
     if persistir:
         sql_ins = """
@@ -785,8 +811,9 @@ def ejecutar_prediccion_ventana(
                 (id_ciclo, id_parcela, ventana, fecha_ventana,
                  lswi_max_efectivo_usado, gpp_acumulado, npp_acumulado,
                  rendimiento_estimado_qq_ha, rendimiento_estimado_qq_parcela,
+                 score_pearson, score_magnitud_pendiente, score_compuesto, cultivo_predicho,
                  fecha_congelamiento)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
             ON CONFLICT (id_ciclo, ventana) DO NOTHING;
         """
         with closing(get_connection_raw()) as conn:
@@ -795,9 +822,29 @@ def ejecutar_prediccion_ventana(
                     id_ciclo, id_parcela, ventana, str(fecha_ventana),
                     lswi_max_usado, gpp_acumulado, npp_acumulado,
                     yield_qq_ha, yield_qq_parcela,
+                    score_pearson_val, score_pend_val, score_comp_val, cultivo_label,
                 ))
                 if cur.rowcount > 0:
                     id_prediccion = cur.lastrowid
+
+        try:
+            from pipeline.modulo_clasificacion import persistir_clasificacion_v2
+            with closing(get_connection_raw()) as conn_per:
+                persistir_clasificacion_v2(
+                    conn_per,
+                    {"estado": "evaluado" if score_comp_val is not None else "sin_datos",
+                     "score_compuesto": score_comp_val,
+                     "r_forma": score_pearson_val,
+                     "pendiente_obs": score_pend_val,
+                     "dia_post_sos": int((pd.Timestamp(fecha_ventana) - sos_ts).days),
+                     "patron_usado": None,
+                     "id_parcela": id_parcela},
+                    id_ciclo,
+                    ventana=ventana,
+                )
+        except Exception as exc:
+            _log_pred.warning("[CLF] Error persistiendo clasificación ciclo %s: %s",
+                              id_ciclo, exc)
 
         if id_prediccion is not None:
             ult_obs_evi  = serie_evi_obs.index[-1]  if not serie_evi_obs.empty  else None

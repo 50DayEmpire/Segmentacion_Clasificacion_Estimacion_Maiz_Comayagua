@@ -407,12 +407,8 @@ def _procesar_ciclo(
             )
             continue
 
-        # Punto de extensión: Clasificación Maíz/No-Maíz (Req 7)
-        # Propósito    : Filtrar parcelas con maíz vs otro cultivo.
-        # Datos entrada: indices_suavizados, perfil fenológico (SOS, t1, t2, t3).
-        # Tabla destino: clasificacion_parcelas (por crear).
-        # Llamada futura: pipeline.modulo_clasificacion.clasificar(ciclo)
-        pass
+        # La clasificación fenológica se ejecuta dentro de
+        # ejecutar_prediccion_ventana() en modulo_predictivo.py
 
         try:
             resultado = ejecutar_prediccion_ventana(

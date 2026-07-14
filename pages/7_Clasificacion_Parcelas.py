@@ -11,6 +11,7 @@ from utils.queries import (
     cargar_indices_suavizados,
 )
 from utils.conexionDB import get_connection_raw
+from pipeline.modulo_clasificacion import _score_a_label
 
 st.markdown("## 🏷️ Clasificación de Parcelas")
 st.markdown(
@@ -18,6 +19,11 @@ st.markdown(
     "agrícolas en el Valle de Comayagua."
 )
 st.divider()
+
+# Forzar datos frescos en cada recarga
+cargar_parcelas.clear()
+cargar_ciclos_no_finalizados.clear()
+cargar_indices_suavizados.clear()
 
 with st.sidebar:
     filtros = render_filtros_parcelas()
@@ -177,7 +183,7 @@ if card_key and card_key.startswith("card_"):
         cols_m[3].metric("Score", f"{sc:.1f}%" if pd.notna(sc) else "—")
         cols_m[4].metric(
             "Cultivo predicho",
-            (det.get("cultivo_predicho") or "—").replace("_", " ").title(),
+            (det.get("cultivo_predicho") if pd.notna(det.get("cultivo_predicho")) else "—").replace("_", " ").title(),
         )
 
         # ── Scores por ventana ────────────────────────────────────────────────
@@ -189,11 +195,11 @@ if card_key and card_key.startswith("card_"):
                 with pcols[j]:
                     st.metric(
                         pr["ventana"],
-                        f"{pr.get('rendimiento_estimado_qq_ha', 0):.1f} qq/ha"
-                        if pd.notna(pr.get("rendimiento_estimado_qq_ha"))
-                        else "—",
-                        f"Score: {pr.get('score_compuesto', 0):.0f}%"
+                        f"{pr.get('score_compuesto', 0):.0f}%"
                         if pd.notna(pr.get("score_compuesto"))
+                        else "—",
+                        pr.get("cultivo_predicho")
+                        if pd.notna(pr.get("cultivo_predicho"))
                         else None,
                     )
         else:
@@ -201,11 +207,46 @@ if card_key and card_key.startswith("card_"):
 
         # ── Gráfica EVI ──────────────────────────────────────────────────────
         st.markdown("#### Serie EVI/LSWI suavizada")
+
+        def _chart_evi_lswi(df, idx_col="fecha"):
+            import altair as alt
+            df_plot = df.melt(id_vars=[idx_col], var_name="indice", value_name="valor")
+            color_scale = alt.Scale(
+                domain=["evi", "lswi"],
+                range=["#2ecc71", "#3498db"],
+            )
+            return alt.Chart(df_plot).mark_line().encode(
+                x=f"{idx_col}:T",
+                y="valor:Q",
+                color=alt.Color("indice:N", scale=color_scale, title=None),
+                tooltip=[f"{idx_col}:T", "valor:Q", "indice:N"],
+            ).properties(height=250).interactive()
+
         df_idx = cargar_indices_suavizados(id_ciclo_exp)
         if df_idx is not None and not df_idx.empty:
-            st.line_chart(df_idx.set_index("fecha")[["evi", "lswi"]])
+            st.altair_chart(_chart_evi_lswi(df_idx), use_container_width=True)
         else:
-            st.caption("Sin datos de índices suavizados para este ciclo.")
+            try:
+                from pipeline.ingesta import cargar_indices_desde_bd
+                from pipeline.modulo_vpm import preprocesar_indices_vpm
+                dfs = cargar_indices_desde_bd(ids_parcelas=[pid_exp])
+                dfs_proc = preprocesar_indices_vpm(dfs)
+                df_evi = dfs_proc["EVI"]
+                col_evi = f"id_{pid_exp}"
+                if col_evi in df_evi.columns:
+                    import altair as alt
+                    df_plot = df_evi[[col_evi]].reset_index()
+                    st.altair_chart(
+                        alt.Chart(df_plot).mark_line(color="#2ecc71").encode(
+                            x="fecha:T", y=f"{col_evi}:Q",
+                            tooltip=["fecha:T", f"{col_evi}:Q"],
+                        ).properties(height=250).interactive(),
+                        use_container_width=True,
+                    )
+                else:
+                    st.caption("Sin datos EVI disponibles.")
+            except Exception:
+                st.caption("Sin datos de índices suavizados para este ciclo.")
 
         # ── Administrar ──────────────────────────────────────────────────────
         st.markdown("#### Administrar clasificación")
@@ -261,7 +302,10 @@ if card_key and card_key.startswith("card_"):
             ):
                 with st.spinner("Calculando clasificación..."):
                     try:
-                        from pipeline.modulo_clasificacion import clasificar_parcela_actual
+                        from pipeline.modulo_clasificacion import (
+                            clasificar_parcela_actual,
+                            persistir_clasificacion_v2,
+                        )
                         from pipeline.ingesta import cargar_indices_desde_bd
 
                         sos_fecha = det["sos"]
@@ -274,26 +318,14 @@ if card_key and card_key.startswith("card_"):
                             )
 
                         if res["estado"] == "evaluado":
-                            score_calc = res.get("score_compuesto", 0)
-                            if pd.notna(score_calc):
-                                if score_calc >= 70:
-                                    label = "Maíz"
-                                elif score_calc <= 30:
-                                    label = "Otro"
-                                else:
-                                    label = "Maíz - baja probabilidad"
-                            else:
-                                label = "Incierto"
-
                             with closing(get_connection_raw()) as conn:
-                                with conn:
-                                    conn.execute(
-                                        "UPDATE produccion_acumulada_ciclo "
-                                        "SET clasificacion_final = ? WHERE id_ciclo = ?",
-                                        (label, id_ciclo_exp),
-                                    )
+                                persistir_clasificacion_v2(
+                                    conn, res, id_ciclo_exp, ventana="T3",
+                                )
+
+                            score_calc = res.get("score_compuesto", 0)
                             st.success(
-                                f"Recalculado: **{label}** "
+                                f"Recalculado: **{_score_a_label(score_calc) if pd.notna(score_calc) else 'Incierto'}** "
                                 f"(score: {score_calc:.1f}%, "
                                 f"patrón: {res.get('patron_usado', '—')})"
                             )

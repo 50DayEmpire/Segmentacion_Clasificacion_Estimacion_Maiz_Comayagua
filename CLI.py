@@ -1573,6 +1573,101 @@ def _accion_seed_historico_offline() -> None:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# SECCIÓN 9 — Clasificación de Cultivos
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _menu_clasificacion() -> None:
+    while True:
+        _seccion("9 · Clasificación de Cultivos")
+        key = _menu({
+            "pendientes": "Clasificar ciclos pendientes (sin clasificacion_final)",
+            "parcela":    "Clasificar parcela específica",
+            "resumen":    "Ver resumen de clasificación",
+        })
+        if key == "0":
+            return
+        elif key == "pendientes":
+            _accion_clasificar_pendientes()
+        elif key == "parcela":
+            _accion_clasificar_parcela()
+        elif key == "resumen":
+            _accion_resumen_clasificacion()
+
+
+def _mostrar_resumen_clasificacion(res: dict) -> None:
+    partes = [
+        f"Procesados: {res['total']}",
+        f"Clasificados: {res['clasificados']}",
+        f"Fuera ventana (<30d): {res.get('fuera_ventana', 0)}",
+        f"Sin patrón ref.: {res.get('sin_patron', 0)}",
+        f"Sin EVI: {res.get('sin_evi', 0)}",
+    ]
+    _ok("  |  ".join(partes))
+    if res["errores"]:
+        _warn(f"Errores: {len(res['errores'])}")
+        for e in res["errores"][:10]:
+            print(f"    • {e}")
+        if len(res["errores"]) > 10:
+            _info(f"... y {len(res['errores']) - 10} error(es) más.")
+
+
+def _accion_clasificar_pendientes() -> None:
+    _seccion("Clasificar ciclos pendientes")
+    _info("Buscando ciclos sin clasificación en todas las temporadas…")
+    with closing(_get_conn()) as conn:
+        from pipeline.modulo_clasificacion import seed_clasificacion
+        res = seed_clasificacion(conn)
+    _mostrar_resumen_clasificacion(res)
+    _pausar()
+
+
+def _accion_clasificar_parcela() -> None:
+    _seccion("Clasificar parcela específica")
+    disponibles = [r[0] for r in _get_conn().execute(
+        "SELECT DISTINCT id_parcela FROM series_diarias_vpm ORDER BY id_parcela;"
+    ).fetchall()]
+    id_parcela = _pedir_parcela(disponibles)
+    if id_parcela is None:
+        _pausar(); return
+    with closing(_get_conn()) as conn:
+        from pipeline.modulo_clasificacion import seed_clasificacion
+        res = seed_clasificacion(conn, ids_parcelas=[id_parcela])
+    _mostrar_resumen_clasificacion(res)
+    _pausar()
+
+
+def _accion_resumen_clasificacion() -> None:
+    _seccion("Resumen de clasificación")
+    try:
+        import pandas as pd
+        with closing(_get_conn()) as conn:
+            df = pd.read_sql(
+                """
+                SELECT temporada,
+                       COUNT(*) AS total,
+                       SUM(CASE WHEN clasificacion_final IS NOT NULL THEN 1 ELSE 0 END) AS clasificados,
+                       SUM(CASE WHEN clasificacion_final IS NULL THEN 1 ELSE 0 END) AS pendientes
+                FROM produccion_acumulada_ciclo
+                GROUP BY temporada
+                ORDER BY temporada
+                """,
+                conn,
+            )
+        if df.empty:
+            _warn("No hay ciclos registrados.")
+        else:
+            pd.set_option("display.max_columns", None)
+            pd.set_option("display.width", 100)
+            print()
+            print(df.to_string(index=False))
+            print()
+            _info(f"Total general: {df['total'].sum()} ciclos, {df['clasificados'].sum()} clasificados, {df['pendientes'].sum()} pendientes.")
+    except Exception as exc:
+        _error(str(exc))
+    _pausar()
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # MENÚ PRINCIPAL
 # ══════════════════════════════════════════════════════════════════════════════
 
@@ -1585,6 +1680,7 @@ _MENU_PRINCIPAL = {
     "diagnostico": "Diagnóstico del proyecto",
     "worker":      "Worker Diario (automatización)",
     "historico":   "Procesamiento histórico de series multianuales",
+    "clasificacion": "Clasificación de cultivos",
     "modo":        "Cambiar modo BD (REAL / PRUEBAS)",
 }
 
@@ -1636,6 +1732,8 @@ def main() -> None:
             _menu_worker()
         elif key == "historico":
             _menu_historico()
+        elif key == "clasificacion":
+            _menu_clasificacion()
         elif key == "modo":
             _accion_cambiar_modo()
 

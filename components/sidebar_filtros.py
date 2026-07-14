@@ -375,6 +375,7 @@ def render_filtros_segmentacion() -> dict:
         bd_path = opciones_bd[bd_seleccionada]
         if Path(bd_path).resolve() != db_actual:
             set_db_path(bd_path)
+            st.session_state["bd_path"] = str(bd_path)
             st.cache_data.clear()
             st.rerun()
 
