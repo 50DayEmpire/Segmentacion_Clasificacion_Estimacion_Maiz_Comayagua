@@ -269,6 +269,71 @@ def cargar_extrapolacion_prediccion(id_prediccion: int) -> dict | None:
     return result
 
 
+@st.cache_data(show_spinner="Cargando ciclos pendientes de clasificación…")
+def cargar_ciclos_no_finalizados(temporada: str) -> pd.DataFrame:
+    """
+    Consulta ciclos con estado ``candidato`` o ``activo`` para la temporada
+    indicada, trayendo el score compuesto y cultivo predicho de la ventana
+    de predicción más avanzada disponible.
+
+    Retorna
+    -------
+    pd.DataFrame
+        Columnas: id_ciclo, id_parcela, sos, t1, t2, t3, eos,
+        estado_ciclo, temporada,
+        score_compuesto, cultivo_predicho, score_pearson,
+        score_magnitud_pendiente, rendimiento_estimado_qq_ha,
+        clasificacion_final.
+    """
+    from contextlib import closing
+    from utils.conexionDB import get_connection_raw
+
+    with closing(get_connection_raw()) as conn:
+        col_exists = "clasificacion_final" in [
+            r[1] for r in conn.execute(
+                "PRAGMA table_info(produccion_acumulada_ciclo)"
+            ).fetchall()
+        ]
+
+    clasif_col = "pac.clasificacion_final" if col_exists else "NULL AS clasificacion_final"
+
+    sql = f"""
+        WITH ultima_ventana AS (
+            SELECT id_ciclo, ventana, score_compuesto, cultivo_predicho,
+                   score_pearson, score_magnitud_pendiente,
+                   rendimiento_estimado_qq_ha,
+                   ROW_NUMBER() OVER (
+                       PARTITION BY id_ciclo
+                       ORDER BY CASE ventana
+                           WHEN 'EOS' THEN 4 WHEN 'T3' THEN 3
+                           WHEN 'T2' THEN 2 WHEN 'T1' THEN 1
+                       END DESC
+                   ) AS rn
+            FROM predicciones_ventana
+        )
+        SELECT pac.id_ciclo, pac.id_parcela, pac.sos,
+               pac.t1, pac.t2, pac.t3, pac.eos,
+               pac.estado_ciclo, pac.temporada,
+               {clasif_col},
+               uv.ventana AS ultima_ventana,
+               uv.score_compuesto, uv.cultivo_predicho,
+               uv.score_pearson, uv.score_magnitud_pendiente,
+               uv.rendimiento_estimado_qq_ha
+        FROM produccion_acumulada_ciclo pac
+        LEFT JOIN ultima_ventana uv
+            ON uv.id_ciclo = pac.id_ciclo AND uv.rn = 1
+        WHERE pac.estado_ciclo IN ('candidato', 'activo')
+          AND pac.temporada = ?
+        ORDER BY pac.sos DESC
+    """
+    with closing(get_connection_raw()) as conn:
+        df = pd.read_sql(sql, conn, params=(temporada,),
+                         parse_dates=["sos", "t1", "t2", "t3", "eos"])
+    if col_exists:
+        df["clasificacion_final"] = df["clasificacion_final"].fillna("")
+    return df
+
+
 @st.cache_data(show_spinner="Cargando área de estudio…")
 def cargar_municipio() -> gpd.GeoDataFrame:
     """

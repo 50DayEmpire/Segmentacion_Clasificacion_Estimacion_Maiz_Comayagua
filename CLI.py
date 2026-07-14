@@ -1246,14 +1246,6 @@ def _accion_worker_configurar() -> None:
             break
         _warn("Formato inválido. Usa HH:MM (ej: 06:00).")
 
-    # ventana_busqueda_dias
-    while True:
-        raw = _pedir("ventana_busqueda_dias (1-30)", str(cfg.get("ventana_busqueda_dias", 7)))
-        if raw.isdigit() and 1 <= int(raw) <= 30:
-            cfg["ventana_busqueda_dias"] = int(raw)
-            break
-        _warn("Debe ser un entero entre 1 y 30.")
-
     # temporada_activa
     while True:
         raw = _pedir("temporada_activa (primera/postrera)", cfg.get("temporada_activa", "primera"))

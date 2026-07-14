@@ -4,18 +4,9 @@ from datetime import date
 from contextlib import closing
 
 import pandas as pd
-import openeo
 
-from config import ANIO_INICIAL_HISTORICO, OPENEO, OPENEOFED
+from config import ANIO_INICIAL_HISTORICO
 from utils.conexionDB import get_connection_raw
-
-
-def _conectar_cdse() -> openeo.Connection:
-    return openeo.connect(f"https://{OPENEO}").authenticate_oidc()
-
-
-def _conectar_fed() -> openeo.Connection:
-    return openeo.connect(f"https://{OPENEOFED}").authenticate_oidc()
 
 
 def _rango_completo() -> tuple[date, date]:
@@ -24,18 +15,27 @@ def _rango_completo() -> tuple[date, date]:
     return inicio, hoy
 
 
-def _fechas_bd_indices(
+def _fechas_stac() -> list[date]:
+    """Retorna todas las fechas en ``cobertura_sentinel2`` ordenadas."""
+    sql = "SELECT fecha FROM cobertura_sentinel2 ORDER BY fecha"
+    with closing(get_connection_raw()) as conn:
+        rows = conn.execute(sql).fetchall()
+    return [date.fromisoformat(r[0]) for r in rows]
+
+
+def _fechas_bd_consultadas(
     fecha_inicio: str,
     fecha_fin: str,
 ) -> pd.DatetimeIndex:
     """
-    Retorna las fechas que ya tienen fila en ``series_diarias_vpm``
-    (hayan sido consultadas al servidor, tengan o no datos válidos).
+    Retorna las fechas que ya fueron consultadas a openEO para índices
+    (column ``consultado = 1`` en ``series_diarias_vpm``).
     """
     sql = """
         SELECT DISTINCT fecha
         FROM series_diarias_vpm
-        WHERE fecha BETWEEN ? AND ?
+        WHERE consultado = 1
+          AND fecha BETWEEN ? AND ?
         ORDER BY fecha
     """
     with closing(get_connection_raw()) as conn:
@@ -64,13 +64,29 @@ def _fechas_bd_clima(
     return pd.DatetimeIndex(df["fecha"].dt.floor("D").unique())
 
 
+def _compactar_gaps(faltantes: pd.DatetimeIndex) -> list[tuple[str, str]]:
+    if faltantes.empty:
+        return []
+    gaps: list[tuple[str, str]] = []
+    i = 0
+    n = len(faltantes)
+    while i < n:
+        g_ini = faltantes[i]
+        g_fin = g_ini
+        j = i + 1
+        while j < n and (faltantes[j] - faltantes[j - 1]).days == 1:
+            g_fin = faltantes[j]
+            j += 1
+        gaps.append((str(g_ini.date()), str(g_fin.date())))
+        i = j
+    return gaps
+
+
 def reporte_cobertura() -> dict:
     """
-    Genera un reporte de cobertura comparando las fechas disponibles en BD
-    contra el rango histórico completo para índices satelitales y datos climáticos.
-
-    Para índices consulta el servidor openEO CDSE para conocer el rango temporal
-    de la colección Sentinel-2 L2A.
+    Genera un reporte de cobertura comparando las fechas de adquisición
+    reales de Sentinel-2 (vía STAC, tabla ``cobertura_sentinel2``) contra
+    las fechas consultadas a openEO (``consultado = 1``).
 
     Para clima (AgERA5) asume cobertura total por ser un reanálisis.
 
@@ -81,68 +97,56 @@ def reporte_cobertura() -> dict:
     inicio, hoy = _rango_completo()
     inicio_str = inicio.isoformat()
     hoy_str = hoy.isoformat()
-    rango_completo_dias = pd.date_range(inicio_str, hoy_str, freq="D")
 
     print(f"\n  Rango histórico: [{inicio_str} → {hoy_str}]")
 
     # ── 1. Índices Sentinel-2 ─────────────────────────────────────────────
-    print("\n  [SAT] Consultando servidor CDSE (colección SENTINEL2_L2A)...")
-    rango_servidor: tuple[date | None, date | None] = (None, None)
-    try:
-        conn_cdse = _conectar_cdse()
-        meta = conn_cdse.describe_collection("SENTINEL2_L2A")
-        te = meta.get("temporal_extent", [None, None])
-        if te and te[0]:
-            rango_servidor = (
-                pd.Timestamp(te[0]).date(),
-                pd.Timestamp(te[1]).date() if te[1] else hoy,
-            )
-            print(f"    Servidor: [{rango_servidor[0]} → {rango_servidor[1]}]")
-        else:
-            print(f"    Servidor: metadata sin temporal_extent.")
-    except Exception as e:
-        print(f"    Error consultando servidor CDSE: {e}")
-
-    fechas_bd_indices = _fechas_bd_indices(inicio_str, hoy_str)
-    n_bd_indices = len(fechas_bd_indices)
-
-    if not fechas_bd_indices.empty:
-        print(f"    BD índices: {n_bd_indices} fecha(s) "
-              f"[{fechas_bd_indices.min().date()} → {fechas_bd_indices.max().date()}]")
+    fechas_stac = _fechas_stac()
+    if fechas_stac:
+        print(f"\n  [SAT] Cobertura STAC: {len(fechas_stac)} fecha(s) "
+              f"[{fechas_stac[0]} → {fechas_stac[-1]}]")
+        stac_desde = str(fechas_stac[0])
+        stac_hasta = str(fechas_stac[-1])
     else:
-        print(f"    BD índices: 0 fechas (vacía)")
+        print(f"\n  [SAT] Tabla ``cobertura_sentinel2`` vacía. "
+              f"Ejecuta ``actualizar_cobertura()`` primero.")
+        stac_desde = None
+        stac_hasta = None
 
-    # Gaps
-    if n_bd_indices > 0:
-        faltantes = rango_completo_dias.difference(fechas_bd_indices, sort=False)
+    fechas_bd = _fechas_bd_consultadas(inicio_str, hoy_str)
+    n_bd = len(fechas_bd)
+
+    if not fechas_bd.empty:
+        print(f"  BD consultadas (consultado=1): {n_bd} fecha(s) "
+              f"[{fechas_bd.min().date()} → {fechas_bd.max().date()}]")
+    else:
+        print(f"  BD consultadas (consultado=1): 0 fechas")
+
+    # Gaps contra STAC
+    if fechas_stac and n_bd > 0:
+        stac_idx = pd.DatetimeIndex(fechas_stac)
+        faltantes = stac_idx.difference(fechas_bd, sort=False)
         n_faltantes = len(faltantes)
-        pct_cubierto = round(100 * n_bd_indices / len(rango_completo_dias), 1)
-    else:
-        faltantes = rango_completo_dias
-        n_faltantes = len(rango_completo_dias)
+        pct_cubierto = round(100 * (len(stac_idx) - n_faltantes) / len(stac_idx), 1) if len(stac_idx) > 0 else 0.0
+    elif fechas_stac:
+        faltantes = pd.DatetimeIndex(fechas_stac)
+        n_faltantes = len(faltantes)
         pct_cubierto = 0.0
+    else:
+        faltantes = pd.DatetimeIndex([])
+        n_faltantes = 0
+        pct_cubierto = None
 
-    # Compactar gaps en rangos
-    gaps_indices: list[tuple[str, str]] = []
-    if n_faltantes > 0:
-        i = 0
-        while i < n_faltantes:
-            g_ini = faltantes[i]
-            g_fin = g_ini
-            j = i + 1
-            while j < n_faltantes and (faltantes[j] - faltantes[j - 1]).days == 1:
-                g_fin = faltantes[j]
-                j += 1
-            gaps_indices.append((str(g_ini.date()), str(g_fin.date())))
-            i = j
+    gaps_indices = _compactar_gaps(faltantes)
 
     # ── 2. Clima AgERA5 ───────────────────────────────────────────────────
-    print(f"\n  [CLIM] Datos climáticos AgERA5 (reanálisis, cobertura total asumida)...")
+    print(f"\n  [CLIM] Datos climáticos AgERA5 (reanálisis)...")
     fechas_bd_clima = _fechas_bd_clima(inicio_str, hoy_str)
     n_bd_clima = len(fechas_bd_clima)
+    rango_dias = pd.date_range(inicio_str, hoy_str, freq="D")
 
     if not fechas_bd_clima.empty:
-        pct_clima = round(100 * n_bd_clima / len(rango_completo_dias), 1)
+        pct_clima = round(100 * n_bd_clima / len(rango_dias), 1)
         print(f"    BD clima: {n_bd_clima} fecha(s) "
               f"[{fechas_bd_clima.min().date()} → {fechas_bd_clima.max().date()}] "
               f"({pct_clima}%)")
@@ -154,16 +158,14 @@ def reporte_cobertura() -> dict:
     resumen = {
         "rango_inicio": inicio_str,
         "rango_fin": hoy_str,
-        "dias_totales": len(rango_completo_dias),
         "indices": {
-            "fechas_bd": n_bd_indices,
+            "stac_desde": stac_desde,
+            "stac_hasta": stac_hasta,
+            "stac_total": len(fechas_stac),
+            "bd_consultadas": n_bd,
             "pct_cubierto": pct_cubierto,
             "n_gaps": len(gaps_indices),
             "gaps": gaps_indices,
-            "bd_desde": str(fechas_bd_indices.min().date()) if n_bd_indices > 0 else None,
-            "bd_hasta": str(fechas_bd_indices.max().date()) if n_bd_indices > 0 else None,
-            "servidor_desde": str(rango_servidor[0]) if rango_servidor[0] else None,
-            "servidor_hasta": str(rango_servidor[1]) if rango_servidor[1] else None,
         },
         "clima": {
             "fechas_bd": n_bd_clima,
@@ -177,21 +179,26 @@ def reporte_cobertura() -> dict:
     print(f"\n  {'=' * 50}")
     print(f"  RESUMEN DE COBERTURA")
     print(f"  {'=' * 50}")
-    print(f"  Período total: {inicio_str} → {hoy_str} ({len(rango_completo_dias)} días)")
+    print(f"  Período: {inicio_str} → {hoy_str}")
     print()
     print(f"  ÍNDICES (EVI/LSWI)")
-    print(f"    BD      : {n_bd_indices} / {len(rango_completo_dias)} días ({pct_cubierto}%)")
+    if fechas_stac:
+        print(f"    STAC (S2 reales): {len(fechas_stac)}")
+    if n_bd > 0:
+        print(f"    BD consultadas   : {n_bd} / {len(fechas_stac) if fechas_stac else '?'}")
+    if pct_cubierto is not None:
+        print(f"    Cobertura        : {pct_cubierto}%")
     if gaps_indices:
-        print(f"    Gaps    : {len(gaps_indices)}")
+        print(f"    Gaps             : {len(gaps_indices)}")
         for g_ini, g_fin in gaps_indices[:10]:
             print(f"      • {g_ini} → {g_fin}")
         if len(gaps_indices) > 10:
             print(f"      ... y {len(gaps_indices) - 10} gap(s) más")
     else:
-        print(f"    Gaps    : 0 — cobertura completa.")
+        print(f"    Gaps             : 0 — cobertura completa.")
     print()
     print(f"  CLIMA (AgERA5)")
-    print(f"    BD      : {n_bd_clima} / {len(rango_completo_dias)} días ({pct_clima}%)")
+    print(f"    BD   : {n_bd_clima} / {len(rango_dias)} días ({pct_clima}%)")
     print(f"  {'=' * 50}")
 
     return resumen

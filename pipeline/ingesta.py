@@ -19,6 +19,7 @@ import openeo
 import pandas as pd
 from config import ESCALA, BOA_OFFSET
 from typing import Literal
+from datetime import date
 
 from utils.dict_a_dataframe import openeo_dict_to_dataframes
 from utils.conexionDB import get_connection_raw
@@ -157,7 +158,7 @@ def obtener_datacube_indices_crudo(
     )
 
     # IMPORTANTE: Conversión de DN a reflectancia real (0-1) para EVI/LSWI:
-    datacube_vpm = datacube_vpm.apply(lambda x: (x - BOA_OFFSET) / ESCALA)
+    datacube_vpm = datacube_vpm.apply(lambda x: (x + BOA_OFFSET) / ESCALA)
 
     datacube_limpio = datacube_vpm.mask(cloud_mask)
     datacube_final  = datacube_limpio.mask_polygon(geojson_openeo)
@@ -645,47 +646,6 @@ def _detectar_gaps(
     gaps.append((bloque_inicio.strftime("%Y-%m-%d"), bloque_prev.strftime("%Y-%m-%d")))
     return gaps
 
-
-def _fechas_consultadas_indices(
-    fecha_inicio: str,
-    fecha_fin: str,
-    ids_parcelas: list[int] | None = None,
-) -> pd.DatetimeIndex:
-    """
-    Devuelve las fechas que **ya fueron enviadas a openEO** para índices,
-    independientemente de si ``evi_crudo`` / ``lswi_crudo`` son NULL.
-
-    Una fila con valores NULL significa que openEO respondió sin datos útiles
-    (nubosidad total); la fecha fue consultada y no debe pedirse de nuevo.
-
-    Se considera que una fecha está cubierta si existe al menos un registro
-    ``(id_parcela, fecha)`` en ``series_diarias_vpm`` para alguna parcela del
-    conjunto, sin importar si los valores de índice son NULL.
-    """
-    from contextlib import closing
-    from utils.conexionDB import get_connection_raw
-
-    condiciones = ["fecha BETWEEN ? AND ?"]
-    params: list = [fecha_inicio, fecha_fin]
-
-    if ids_parcelas:
-        ph = ",".join(["?"] * len(ids_parcelas))
-        condiciones.append(f"id_parcela IN ({ph})")
-        params.extend(ids_parcelas)
-
-    sql = f"""
-        SELECT DISTINCT fecha
-        FROM series_diarias_vpm
-        WHERE {' AND '.join(condiciones)}
-        ORDER BY fecha;
-    """
-
-    with closing(get_connection_raw()) as conn:
-        df = pd.read_sql(sql, conn, params=params, parse_dates=["fecha"])
-
-    return pd.DatetimeIndex(df["fecha"].dt.floor("D").unique()) if not df.empty else pd.DatetimeIndex([])
-
-
 def _fechas_consultadas_clima(
     fecha_inicio: str,
     fecha_fin: str,
@@ -832,6 +792,43 @@ def obtener_clima_por_lotes(
     return acumulado
 
 
+def _extraer_bbox(geojson: dict) -> list[float]:
+    """Bounding box [west, south, east, north] del GeoJSON FeatureCollection."""
+    gdf = gpd.GeoDataFrame.from_features(geojson["features"], crs="EPSG:4326")
+    bounds = gdf.total_bounds
+    return [float(bounds[0]), float(bounds[1]), float(bounds[2]), float(bounds[3])]
+
+
+def _agrupar_gaps(fechas: list[date]) -> list[tuple[date, date]]:
+    """Agrupa fechas consecutivas en rangos [inicio, fin]."""
+    if not fechas:
+        return []
+    rangos: list[tuple[date, date]] = []
+    ini = fechas[0]
+    prev = fechas[0]
+    for f in fechas[1:]:
+        if (f - prev).days == 1:
+            prev = f
+        else:
+            rangos.append((ini, prev))
+            ini = f
+            prev = f
+    rangos.append((ini, prev))
+    return rangos
+
+
+def _consultadas_por_indices(fecha_inicio: str, fecha_fin: str) -> set[str]:
+    """Fechas con consultado=1 en series_diarias_vpm (única fuente de verdad)."""
+    with closing(get_connection_raw()) as conn:
+        rows = conn.execute(
+            """SELECT DISTINCT fecha FROM series_diarias_vpm
+               WHERE consultado = 1 AND fecha BETWEEN ? AND ?
+               ORDER BY fecha""",
+            (fecha_inicio, fecha_fin),
+        ).fetchall()
+    return {r[0] for r in rows}
+
+
 def obtener_indices(
     connection: openeo.Connection,
     geojson_openeo: dict,
@@ -841,9 +838,16 @@ def obtener_indices(
     forzar_descarga: bool = False,
 ) -> dict[str, pd.DataFrame]:
     """
-    Descarga índices EVI/LSWI desde openEO para el rango completo y los
-    persiste en BD. Si ``forzar_descarga=True`` reemplaza los datos existentes;
-    caso contrario hace upsert (no sobreescribe valores no-NULL).
+    Descarga índices EVI/LSWI desde openEO para las fechas de adquisición
+    reales de Sentinel-2 que aún no han sido consultadas, y las persiste en BD.
+
+    La detección de gaps usa:
+      1. STAC (``cobertura_sentinel2``) — fechas de adquisición reales S2 L2A.
+      2. ``consultado=1`` — fechas ya enviadas a openEO.
+      Gaps = STAC - consultados → solo se descargan las fechas faltantes.
+
+    Si ``forzar_descarga=True`` reemplaza todos los datos existentes
+    (sin gap detection, descarga completa).
 
     Parámetros
     ----------
@@ -858,7 +862,8 @@ def obtener_indices(
     config_cloud_mask : dict | None
         Overrides para la máscara SCL. Igual que en ``obtener_datacube_indices_crudo``.
     forzar_descarga : bool
-        Si ``True``, sobreescribe los datos existentes (``mode="replace"``).
+        Si ``True``, ignora STAC/consultado y descarga el rango completo
+        sobreescribiendo datos existentes (``mode="replace"``).
 
     Retorna
     -------
@@ -867,16 +872,76 @@ def obtener_indices(
         Mismo esquema que ``obtener_datacube_indices_crudo``.
     """
 
-    modo = "replace" if forzar_descarga else "append"
-    print(f"{'🔄' if forzar_descarga else '🛰️'}  Índices: descargando [{fecha_inicio} → {fecha_fin}] desde openEO...")
-    dfs = obtener_datacube_indices_crudo(connection, geojson_openeo, fecha_inicio, fecha_fin, config_cloud_mask)
+    if forzar_descarga:
+        print(f"🔄  forzar_descarga=True — descargando [{fecha_inicio} → {fecha_fin}] completo desde openEO...")
+        dfs = obtener_datacube_indices_crudo(connection, geojson_openeo, fecha_inicio, fecha_fin, config_cloud_mask)
+        if all(df.empty for df in dfs.values()):
+            print("  ⚠️  Sin datos retornados desde openEO.")
+            return dfs
+        guardar_indices_crudos(dfs, mode="replace")
+        return cargar_indices_desde_bd(fecha_inicio=fecha_inicio, fecha_fin=fecha_fin)
 
-    if all(df.empty for df in dfs.values()):
-        print("  ⚠️  Sin datos retornados desde openEO.")
-        return dfs
+    # ── 1. Obtener adquisiciones reales S2 desde STAC ────────────────────────
+    from utils.cobertura_sentinel2 import actualizar_cobertura
+    bbox = _extraer_bbox(geojson_openeo)
+    stac_dates = actualizar_cobertura(bbox)
+    finicio_dt = date.fromisoformat(fecha_inicio)
+    ffin_dt = date.fromisoformat(fecha_fin)
+    stac_dates = [d for d in stac_dates if finicio_dt <= d <= ffin_dt]
 
-    guardar_indices_crudos(dfs, mode=modo)
+    if not stac_dates:
+        print(f"  ⚠️  STAC sin fechas de adquisición en [{fecha_inicio} → {fecha_fin}]. Sin descarga.")
+        return cargar_indices_desde_bd(fecha_inicio=fecha_inicio, fecha_fin=fecha_fin)
 
+    # ── 2. Fechas ya consultadas (consultado=1) ──────────────────────────────
+    consultadas = _consultadas_por_indices(fecha_inicio, fecha_fin)
+
+    # ── 3. Gaps = STAC - consultadas (agrupados por orden STAC real) ─────────
+    faltantes_set = {d.isoformat() for d in stac_dates} - consultadas
+    gaps: list[tuple[date, date]] = []
+    ini = None
+    for d in stac_dates:
+        if d.isoformat() in faltantes_set:
+            if ini is None:
+                ini = d
+            fin = d
+        else:
+            if ini is not None:
+                gaps.append((ini, fin))
+                ini = None
+    if ini is not None:
+        gaps.append((ini, fin))
+
+    if not gaps:
+        print(f"✅  Índices: BD cubre todas las fechas STAC [{fecha_inicio} → {fecha_fin}].")
+        return cargar_indices_desde_bd(fecha_inicio=fecha_inicio, fecha_fin=fecha_fin)
+
+    print(f"🛰️  Índices: {len(faltantes_set)} gap(s) de adquisición S2 en {len(gaps)} lote(s):")
+    for g_ini, g_fin in gaps:
+        print(f"     • {g_ini} → {g_fin}")
+
+    # ── 4. Descargar cada gap y persistir ────────────────────────────────────
+    for g_ini, g_fin in gaps:
+        g_ini_s = g_ini.isoformat()
+        g_fin_s = g_fin.isoformat()
+        print(f"\n  Descargando gap [{g_ini_s} → {g_fin_s}]...")
+        try:
+            dfs_gap = obtener_datacube_indices_crudo(
+                connection, geojson_openeo, g_ini_s, g_fin_s, config_cloud_mask,
+            )
+        except Exception as exc:
+            print(f"  ⚠️  Gap [{g_ini_s} → {g_fin_s}]: error ignorado — {exc}")
+            continue
+        if all(df.empty for df in dfs_gap.values()):
+            print(f"  ⚠️  Gap [{g_ini_s} → {g_fin_s}]: sin datos retornados, se omite.")
+            continue
+        try:
+            guardar_indices_crudos(dfs_gap, mode="append")
+        except Exception as exc:
+            print(f"  ⚠️  Gap [{g_ini_s} → {g_fin_s}]: error al persistir — {exc}")
+            continue
+
+    # ── 5. Recargar desde BD y devolver rango completo ───────────────────────
     return cargar_indices_desde_bd(fecha_inicio=fecha_inicio, fecha_fin=fecha_fin)
 
 
@@ -1088,8 +1153,20 @@ def guardar_indices_crudos(
                 print(f"🗑️  {len(parcelas)} parcela(s) reiniciadas en el rango {fecha_min}–{fecha_max} (mode='replace').")
             conn.executemany(sql_upsert, rows)
 
+            # Marcar como consultadas las fechas afectadas
+            parcelas_upd = merged["id_parcela"].unique().tolist()
+            f_min, f_max = merged["fecha"].min(), merged["fecha"].max()
+            ph = ",".join(["?"] * len(parcelas_upd))
+            conn.execute(
+                f"""UPDATE series_diarias_vpm SET consultado = 1
+                    WHERE id_parcela IN ({ph})
+                      AND fecha BETWEEN ? AND ?""",
+                (*parcelas_upd, f_min, f_max),
+            )
+
     n = len(rows)
-    print(f"✅  {n} filas escritas en 'series_diarias_vpm' (mode='{mode}').")
+    print(f"✅  {n} filas escritas en 'series_diarias_vpm' (mode='{mode}'). "
+          f"Consultado=1 para {len(parcelas_upd)} parcela(s) en rango {f_min}–{f_max}.")
     return n
 
 

@@ -92,6 +92,7 @@ def _crear_tablas_sql(conn: sqlite3.Connection) -> None:
             temperatura_diaria_promedio REAL,
             radiacion_total_promedio    REAL,
             gpp_diario                  REAL,
+            consultado                  INTEGER NOT NULL DEFAULT 0,
             PRIMARY KEY (id_parcela, fecha),
             FOREIGN KEY (id_parcela) REFERENCES parcelas_vigentes(id_parcela)
         );
@@ -200,16 +201,23 @@ def _crear_tablas_sql(conn: sqlite3.Connection) -> None:
             dia_post_sos      INTEGER NOT NULL,
             evi_promedio      REAL    NOT NULL,
             evi_desviacion    REAL,
+            mediana_pendiente_verdeo REAL,
             n_muestras        INTEGER NOT NULL,
             ids_parcelas_usadas TEXT  NOT NULL, 
             fecha_construccion TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
             version           INTEGER NOT NULL DEFAULT 1,
             PRIMARY KEY (id_patron AUTOINCREMENT),
-            UNIQUE (subtipo, dia_post_sos, version),
-            CHECK (subtipo IN ('grano_rapido', 'grano_lento'))
+            UNIQUE (subtipo, dia_post_sos, version)
         );
     """)
 
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS cobertura_sentinel2 (
+            id_cobertura INTEGER NOT NULL,
+            fecha        DATE    NOT NULL,
+            PRIMARY KEY (id_cobertura AUTOINCREMENT)
+        );
+    """)
 
 def seeding(rutaGJSON: str) -> None:
     actualizar_gpkg(rutaGJSON, "replace")

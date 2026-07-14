@@ -900,9 +900,7 @@ def obtener_ciclos_activos(
     fecha_hoy,
 ) -> list[dict]:
     """
-    Retorna ciclos activos (``eos`` IS NULL, ``fecha_inicio`` <= fecha_hoy,
-    ``temporada`` = temporada_activa, ``estado_ciclo`` = 'activo' o NULL por
-    compatibilidad hacia atrás) desde ``produccion_acumulada_ciclo``.
+    Retorna ciclos activos de la temporada cuyo ``eos`` aún no ha pasado.
     """
     from contextlib import closing
     from utils.conexionDB import get_connection_raw
@@ -911,11 +909,9 @@ def obtener_ciclos_activos(
         SELECT id_ciclo, id_parcela, temporada, lswi_max,
                sos, t1, t2, t3, eos, fecha_inicio, fecha_fin
         FROM produccion_acumulada_ciclo
-        WHERE eos IS NULL
-          AND fecha_inicio IS NOT NULL
-          AND fecha_inicio <= ?
-          AND temporada = ?
-          AND (estado_ciclo = 'activo' OR estado_ciclo IS NULL)
+        WHERE temporada = ?
+          AND estado_ciclo = 'activo'
+          AND (eos IS NULL OR eos >= ?)
         ORDER BY id_ciclo;
     """
     cols = [
@@ -925,7 +921,7 @@ def obtener_ciclos_activos(
     try:
         with closing(get_connection_raw()) as conn:
             rows = conn.execute(
-                sql, (str(fecha_hoy), temporada_activa),
+                sql, (temporada_activa, str(fecha_hoy)),
             ).fetchall()
         return [dict(zip(cols, r)) for r in rows]
     except Exception:

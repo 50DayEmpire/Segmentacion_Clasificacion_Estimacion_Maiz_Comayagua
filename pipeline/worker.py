@@ -36,7 +36,6 @@ LOGS_DIR           = ROOT / "logs"
 WORKER_CONFIG_DEFAULTS: dict[str, Any] = {
     "activo":               False,
     "hora_ejecucion":       "06:00",
-    "ventana_busqueda_dias": 7,
     "temporada_activa":     "primera",
     "factor_sos":           0.2,
     "ultima_ejecucion":     None,
@@ -225,11 +224,6 @@ def _conectar_openeo_cdse():
     return openeo.connect(f"https://{OPENEO}").authenticate_oidc()
 
 
-def _conectar_openeo_fed():
-    import openeo
-    from config import OPENEOFED
-    return openeo.connect(f"https://{OPENEOFED}").authenticate_oidc()
-
 def _calcular_ventana_ingesta(
     id_parcela: int,
     fecha_hoy: date,
@@ -267,93 +261,7 @@ def _calcular_ventana_ingesta(
     return fecha_ini.strftime("%Y-%m-%d"), fecha_hoy.strftime("%Y-%m-%d")
 
 
-def _detectar_nuevas_adquisiciones(
-    ciclo: dict,
-    geojson: dict,
-    fecha_hoy: date,
-    dias_fallback_sin_historial: int,
-    logger: logging.Logger,
-) -> list[date]:
-    from pipeline.openeo_catalogo import (
-        detectar_fechas_nuevas,
-        obtener_fechas_disponibles_s2,
-    )
 
-    id_ciclo   = ciclo["id_ciclo"]
-    id_parcela = ciclo["id_parcela"]
-    fecha_ini, fecha_fin = _calcular_ventana_ingesta(
-        id_parcela, fecha_hoy, dias_fallback_sin_historial,
-    )
-
-    try:
-        conn = _conectar_openeo_cdse()
-        fechas_catalogo = obtener_fechas_disponibles_s2(conn, geojson, fecha_ini, fecha_fin)
-    except Exception as exc:
-        _log_seguro(
-            logger, "warning",
-            "Error consultando catálogo Sentinel-2 para ciclo id_ciclo=%s: %s\n%s",
-            id_ciclo, exc, traceback.format_exc(),
-        )
-        return []
-
-    from contextlib import closing
-    from utils.conexionDB import get_connection_raw
-    sql = "SELECT DISTINCT fecha FROM series_diarias_vpm WHERE id_parcela = ? AND fecha BETWEEN ? AND ?"
-    with closing(get_connection_raw()) as _conn:
-        fechas_existentes = set(
-            r[0] for r in _conn.execute(sql, (id_parcela, fecha_ini, fecha_fin)).fetchall()
-        )
-
-    nuevas = detectar_fechas_nuevas(fechas_catalogo, fechas_existentes)
-
-    if not nuevas:
-        _log_seguro(logger, "info", "Sin nuevas adquisiciones para ciclo id_ciclo=%s", id_ciclo)
-
-    return nuevas
-
-
-def _ingestar_fechas_nuevas(
-    fechas_nuevas: list[date],
-    geojson: dict,
-    logger: logging.Logger,
-    id_ciclo: int,
-) -> tuple[int, int]:
-    from pipeline.ingesta import obtener_clima, obtener_indices
-
-    if not fechas_nuevas:
-        return 0, 0
-
-    fecha_ini = min(fechas_nuevas).strftime("%Y-%m-%d")
-    fecha_fin = max(fechas_nuevas).strftime("%Y-%m-%d")
-    n = len(fechas_nuevas)
-
-    try:
-        conn_cdse = _conectar_openeo_cdse()
-        obtener_indices(conn_cdse, geojson, fecha_ini, fecha_fin)
-    except Exception as exc:
-        _log_seguro(
-            logger, "error",
-            "Error en ingesta de índices id_ciclo=%s: %s\n%s",
-            id_ciclo, exc, traceback.format_exc(),
-        )
-        return 0, n
-
-    try:
-        conn_fed = _conectar_openeo_fed()
-        obtener_clima(conn_fed, geojson, fecha_ini, fecha_fin)
-    except Exception as exc:
-        _log_seguro(
-            logger, "warning",
-            "Error en ingesta de clima id_ciclo=%s (se reintentará después): %s",
-            id_ciclo, exc,
-        )
-
-    _log_seguro(
-        logger, "info",
-        "Ingesta ciclo id_ciclo=%s: %d fechas procesadas.",
-        id_ciclo, n,
-    )
-    return n, 0
 
 
 def _preprocesar_ciclo(
@@ -429,9 +337,7 @@ def _preprocesar_ciclo(
 def _procesar_ciclo(
     ciclo: dict,
     fecha_hoy: date,
-    ventana_busqueda_dias: int,
     factor_sos: float,
-    simulacion: bool,
     logger: logging.Logger,
 ) -> tuple[int, int]:
     """Orquesta el procesamiento de un ciclo activo. Retorna (ingestadas, predicciones)."""
@@ -452,22 +358,6 @@ def _procesar_ciclo(
     )
 
     ingestadas = 0
-
-    if not simulacion:
-        try:
-            geojson = _cargar_geojson_parcelas()
-        except Exception as exc:
-            _log_seguro(logger, "error", "Error cargando GeoJSON id_ciclo=%s: %s", id_ciclo, exc)
-            geojson = None
-
-        if geojson:
-            fechas_nuevas = _detectar_nuevas_adquisiciones(
-                ciclo, geojson, fecha_hoy, ventana_busqueda_dias, logger,
-            )
-            if fechas_nuevas:
-                ok, _ = _ingestar_fechas_nuevas(fechas_nuevas, geojson, logger, id_ciclo)
-                ingestadas = ok
-
     dfs_vpm_por_parcela = _preprocesar_ciclo(ciclo, fecha_hoy, logger)
     if dfs_vpm_por_parcela is None:
         return ingestadas, 0
@@ -579,52 +469,39 @@ def _finalizar_ejecucion(
 # ══════════════════════════════════════════════════════════════════════════════
 
 CONSECUTIVOS_REQUERIDOS = 3
-
-MARGEN_DIAS_SIN_HISTORIAL_CANDIDATO   = 90   # si nunca hubo ciclo confirmado
-LIMITE_MAX_DIAS_HISTORIAL_CANDIDATO   = 180  # tope de lookback aunque el último EOS sea muy viejo
+LIMITE_MAX_DIAS_HISTORIAL_CANDIDATO   = 180
 
 
-def _calcular_ventana_busqueda_candidato(
-    id_parcela: int,
-    fecha_ini_ventana_calendario: date,
-    fecha_hoy: date,
-) -> tuple[str, str]:
-    """
-    Ventana de búsqueda histórica para detección de SOS candidato:
-    desde el día siguiente al último EOS confirmado de la parcela
-    (cualquier temporada), hasta hoy.
-
-    Si no existe ningún ciclo finalizado previo (cold start real), usa
-    como ancla el inicio de la ventana de calendario de la temporada
-    activa menos un margen, para tener suelo desnudo real que buscar.
-
-    Se acota a LIMITE_MAX_DIAS_HISTORIAL_CANDIDATO días hacia atrás como
-    máximo, para no escanear series completas de parcelas inactivas por años.
-    """
+def _obtener_ultimo_eos(id_parcela: int) -> str:
     from contextlib import closing
     from utils.conexionDB import get_connection_raw
-
     with closing(get_connection_raw()) as conn:
         row = conn.execute(
             """SELECT MAX(eos) FROM produccion_acumulada_ciclo
                WHERE id_parcela = ? AND estado_ciclo = 'finalizado' AND eos IS NOT NULL""",
             (id_parcela,),
         ).fetchone()
-
     ultimo_eos = row[0] if row and row[0] else None
+    if ultimo_eos is None:
+        raise RuntimeError(
+            f"id_parcela={id_parcela} no tiene ningún ciclo finalizado. "
+            "Ejecuta el seed histórico offline antes de usar el worker."
+        )
+    return str(ultimo_eos)
 
-    if ultimo_eos:
-        fecha_ini = date.fromisoformat(str(ultimo_eos)) + timedelta(days=1)
-    else:
-        fecha_ini = fecha_ini_ventana_calendario - timedelta(days=MARGEN_DIAS_SIN_HISTORIAL_CANDIDATO)
 
+def _calcular_ventana_busqueda_candidato(
+    id_parcela: int,
+    fecha_hoy: date,
+) -> tuple[str, str, str]:
+    ultimo_eos = _obtener_ultimo_eos(id_parcela)
+    fecha_ini = date.fromisoformat(ultimo_eos) + timedelta(days=1)
     limite_min = fecha_hoy - timedelta(days=LIMITE_MAX_DIAS_HISTORIAL_CANDIDATO)
     if fecha_ini < limite_min:
         fecha_ini = limite_min
     if fecha_ini > fecha_hoy:
         fecha_ini = fecha_hoy
-
-    return fecha_ini.strftime("%Y-%m-%d"), fecha_hoy.strftime("%Y-%m-%d")
+    return ultimo_eos, fecha_ini.strftime("%Y-%m-%d"), fecha_hoy.strftime("%Y-%m-%d")
 
 def _calcular_fechas_ciclo(sos_date: date) -> dict[str, date]:
     from config import DIAS_VENTANAS
@@ -633,32 +510,25 @@ def _calcular_fechas_ciclo(sos_date: date) -> dict[str, date]:
         "t1":  sos_date + timedelta(days=DIAS_VENTANAS["T1"]),
         "t2":  sos_date + timedelta(days=DIAS_VENTANAS["T2"]),
         "t3":  sos_date + timedelta(days=DIAS_VENTANAS["T3"]),
-        "eos": sos_date + timedelta(days=DIAS_VENTANAS["eos"]),
+        "eos": sos_date + timedelta(days=DIAS_VENTANAS["EOS"]),
     }
 
-def _obtener_ventana_temporada(temporada: str, fecha_hoy: date) -> tuple[date, date] | None:
-    """Retorna (inicio, fin) de la ventana de siembra para la temporada."""
-    if temporada == "primera":
-        return date(fecha_hoy.year, 4, 1), date(fecha_hoy.year, 7, 31)
-    if temporada == "postrera":
-        return date(fecha_hoy.year, 8, 1), date(fecha_hoy.year + 1, 3, 31)
-    return None
+
+def _temporada_por_sos(sos_date: date) -> str:
+    return "primera" if 4 <= sos_date.month <= 7 else "postrera"
 
 
 def detectar_y_crear_ciclos_pendientes(
-    temporada_activa: str,
     fecha_hoy: date,
-    ventana_busqueda_dias: int,
     factor_sos: float,
     simulacion: bool,
     logger: logging.Logger,
 ) -> tuple[int, int]:
     """
-    1. Identifica parcelas sin ciclo activo/candidato para la temporada actual
-       dentro de la ventana de siembra.
-    2. Para cada parcela pendiente: ingesta EVI reciente, corre SOS candidato
+    1. Identifica parcelas sin ciclo activo/candidato (de cualquier temporada).
+    2. Para cada parcela pendiente: carga EVI desde BD, corre SOS candidato
        y crea un registro en ``produccion_acumulada_ciclo`` con
-       ``estado_ciclo = 'candidato'``.
+       ``estado_ciclo = 'candidato'`` y temporada determinada por el mes del SOS.
     3. Para cada candidato existente: verifica que la señal persista N
        observaciones válidas consecutivas por encima del umbral; si cumple,
        lo promueve a ``estado_ciclo = 'activo'``.
@@ -668,17 +538,6 @@ def detectar_y_crear_ciclos_pendientes(
     from contextlib import closing
     from utils.conexionDB import get_connection_raw
 
-    ventana = _obtener_ventana_temporada(temporada_activa, fecha_hoy)
-    if ventana is None:
-        _log_seguro(logger, "warning", "Temporada '%s' no reconocida, se omite detección.", temporada_activa)
-        return 0, 0
-
-    fecha_ini_ventana, fecha_fin_ventana = ventana
-
-    if not (fecha_ini_ventana <= fecha_hoy <= fecha_fin_ventana):
-        _log_seguro(logger, "info", "Fecha actual fuera de la ventana de siembra de %s.", temporada_activa)
-        return 0, 0
-
     # 1. Obtener parcelas vigentes
     with closing(get_connection_raw()) as conn:
         parcelas = [r[0] for r in conn.execute("SELECT id_parcela FROM parcelas_vigentes").fetchall()]
@@ -686,27 +545,24 @@ def detectar_y_crear_ciclos_pendientes(
     if not parcelas:
         return 0, 0
 
-    # 2. Obtener ciclos existentes (candidato + activo) para la temporada
+    # 2. Obtener ciclos existentes (candidato + activo) de cualquier temporada
     placeholders = ",".join(["?" for _ in parcelas])
     sql_existentes = f"""
         SELECT id_parcela, estado_ciclo, id_ciclo
         FROM produccion_acumulada_ciclo
         WHERE id_parcela IN ({placeholders})
-          AND temporada = ?
-          AND (
-              estado_ciclo IN ('candidato', 'activo')
-              OR (estado_ciclo IS NULL AND eos IS NULL)
-          )
+          AND (estado_ciclo IN ('candidato', 'activo')
+               OR (estado_ciclo IS NULL AND eos IS NULL))
     """
     with closing(get_connection_raw()) as conn:
-        existentes = conn.execute(sql_existentes, (*parcelas, temporada_activa)).fetchall()
+        existentes = conn.execute(sql_existentes, tuple(parcelas)).fetchall()
 
     parcelas_con_ciclo = {r[0] for r in existentes}
     parcelas_candidato = {r[0] for r in existentes if r[1] == 'candidato'}
 
     pendientes = [p for p in parcelas if p not in parcelas_con_ciclo]
     if not pendientes and not parcelas_candidato:
-        _log_seguro(logger, "info", "Todas las parcelas ya tienen ciclo activo o candidato para %s.", temporada_activa)
+        _log_seguro(logger, "info", "Todas las parcelas ya tienen ciclo activo o candidato.")
         return 0, 0
 
     _log_seguro(
@@ -724,26 +580,59 @@ def detectar_y_crear_ciclos_pendientes(
         if not geojson:
             _log_seguro(logger, "error", "No se pudo cargar GeoJSON para detección de ciclos.")
 
+        # Una sola lectura batch desde BD (la ingesta STAC ya corrió antes)
+        prev_eos_por_parcela: dict[int, str] = {}
+        fechas_por_parcela: dict[int, tuple[str, str]] = {}
+        fecha_min = fecha_max = None
+        for id_parcela in pendientes:
+            prev_eos, ini, fin = _calcular_ventana_busqueda_candidato(id_parcela, fecha_hoy)
+            prev_eos_por_parcela[id_parcela] = prev_eos
+            fechas_por_parcela[id_parcela] = (ini, fin)
+            if fecha_min is None or ini < fecha_min:
+                fecha_min = ini
+            if fecha_max is None or fin > fecha_max:
+                fecha_max = fin
+
+        from pipeline.ingesta import cargar_indices_desde_bd
+        try:
+            dfs = cargar_indices_desde_bd(
+                fecha_inicio=fecha_min, fecha_fin=fecha_max,
+                ids_parcelas=pendientes,
+            )
+        except ValueError:
+            _log_seguro(
+                logger, "warning",
+                "Sin datos en BD para parcelas pendientes en rango %s–%s. "
+                "No se crearán candidatos esta ejecución.",
+                fecha_min, fecha_max,
+            )
+            pendientes = []
+            dfs = None
+
+        if dfs is not None:
+            from pipeline.modulo_vpm import preprocesar_indices_vpm
+            dfs_vpm = preprocesar_indices_vpm(dfs)
+
         for id_parcela in pendientes:
             try:
-                fecha_ini_busq, fecha_fin_busq = _calcular_ventana_busqueda_candidato(
-                    id_parcela, fecha_ini_ventana, fecha_hoy,
-                )
-
-                conn_cdse = _conectar_openeo_cdse()
-                from pipeline.ingesta import obtener_indices
-                dfs = obtener_indices(conn_cdse, geojson, fecha_ini_busq, fecha_fin_busq)
-
-                from pipeline.modulo_vpm import preprocesar_indices_vpm
-                dfs_vpm = preprocesar_indices_vpm(dfs)
-
+                fecha_ini_busq, fecha_fin_busq = fechas_por_parcela[id_parcela]
                 col = f"id_{id_parcela}"
                 df_evi = dfs_vpm["EVI"]
                 if col not in df_evi.columns:
+                    _log_seguro(
+                        logger, "info",
+                        "Parcela %s: sin columna EVI en BD, se omite.",
+                        id_parcela,
+                    )
                     continue
 
                 serie = df_evi[col].dropna()
                 if len(serie) < 3:
+                    _log_seguro(
+                        logger, "info",
+                        "Parcela %s: solo %d observaciones EVI (mínimo 3), se omite.",
+                        id_parcela, len(serie),
+                    )
                     continue
 
                 from pipeline.modulo_fenologico import detectar_sos
@@ -758,18 +647,14 @@ def detectar_y_crear_ciclos_pendientes(
                 if sos_fecha is None:
                     continue
 
-                # Validar no-solapamiento con ciclo activo de la temporada contraria
                 sos_date = sos_fecha.date() if hasattr(sos_fecha, "date") else sos_fecha
                 fechas_ciclo = _calcular_fechas_ciclo(sos_date)
                 eos_date = fechas_ciclo["eos"]
+                temporada_asignada = _temporada_por_sos(sos_date)
 
-                # Validar no-solapamiento con ciclo activo/candidato de la temporada
-                # contraria, comparando intervalos [sos, eos] reales, no ventanas
-                # de calendario.
                 sql_overlap = """
                     SELECT COUNT(*) FROM produccion_acumulada_ciclo
                     WHERE id_parcela = ?
-                      AND temporada != ?
                       AND estado_ciclo IN ('candidato', 'activo')
                       AND sos IS NOT NULL
                       AND NOT (
@@ -780,7 +665,7 @@ def detectar_y_crear_ciclos_pendientes(
                 with closing(get_connection_raw()) as conn:
                     overlap = conn.execute(
                         sql_overlap,
-                        (id_parcela, temporada_activa, str(sos_date), str(eos_date)),
+                        (id_parcela, str(sos_date), str(eos_date)),
                     ).fetchone()[0]
                 if overlap > 0:
                     _log_seguro(
@@ -812,18 +697,18 @@ def detectar_y_crear_ciclos_pendientes(
                 with closing(get_connection_raw()) as conn:
                     with conn:
                         cursor = conn.execute(sql_insert, (
-                            id_parcela, temporada_activa, lswi_max_val, str(sos_date),
+                            id_parcela, temporada_asignada, lswi_max_val, str(sos_date),
                             str(fechas_ciclo["t1"]), str(fechas_ciclo["t2"]),
                             str(fechas_ciclo["t3"]), str(eos_date),
-                            None, None,
+                            prev_eos_por_parcela[id_parcela], str(eos_date),
                         ))
                         nuevo_id_ciclo = cursor.lastrowid
 
                 creados += 1
                 _log_seguro(
                     logger, "info",
-                    "Candidato creado: id_parcela=%s sos=%s eos=%s id_ciclo=%s",
-                    id_parcela, sos_date, eos_date, nuevo_id_ciclo,
+                    "Candidato creado: id_parcela=%s temporada=%s sos=%s eos=%s id_ciclo=%s",
+                    id_parcela, temporada_asignada, sos_date, eos_date, nuevo_id_ciclo,
                 )
 
             except Exception as exc:
@@ -843,8 +728,9 @@ def detectar_y_crear_ciclos_pendientes(
                     cand = conn.execute(
                         """SELECT id_ciclo, sos
                            FROM produccion_acumulada_ciclo
-                           WHERE id_parcela = ? AND temporada = ? AND estado_ciclo = 'candidato'""",
-                        (id_parcela, temporada_activa),
+                           WHERE id_parcela = ? AND estado_ciclo = 'candidato'
+                           ORDER BY id_ciclo LIMIT 1""",
+                        (id_parcela,),
                     ).fetchone()
 
                 if cand is None:
@@ -972,32 +858,46 @@ def ejecutar(fecha_hoy: date | str | None = None) -> dict:
         pass
 
     temporada_activa      = cfg.get("temporada_activa", "primera")
-    ventana_busqueda_dias = int(cfg.get("ventana_busqueda_dias", 7))
-    factor_sos            = float(cfg.get("factor_sos", 0.2))
-    dias_fallback_ingesta = int(cfg.get("dias_fallback_sin_historial_ingesta", 7))
+    factor_sos = float(cfg.get("factor_sos", 0.2))
 
     if simulacion:
         _log_seguro(logger, "info", "MODO SIMULACIÓN — Fecha simulada: %s", fecha_hoy)
     _log_seguro(
         logger, "info",
-        "=== INICIO WORKER === fecha=%s | temporada=%s | factor_sos=%.2f | "
-        "ventana_busqueda=%dd | simulacion=%s",
-        fecha_hoy, temporada_activa, factor_sos,
-        ventana_busqueda_dias, simulacion,
+        "=== INICIO WORKER === fecha=%s | temporada=%s | factor_sos=%.2f | simulacion=%s",
+        fecha_hoy, temporada_activa, factor_sos, simulacion,
     )
     _log_seguro(logger, "info", "Configuración activa: %s", json.dumps(cfg, default=str))
+    from utils.conexionDB import get_db_path
+    _log_seguro(logger, "info", "Base de datos: %s", get_db_path())
 
     ciclos_procesados  = 0
     total_ingestadas   = 0
     total_predicciones = 0
     errores: list[str] = []
 
+    # ── Ingesta global de índices (STAC + consultado) ────────────────────────
+    if not simulacion:
+        try:
+            geojson = _cargar_geojson_parcelas()
+            conn_cdse = _conectar_openeo_cdse()
+            from pipeline.ingesta import obtener_indices
+            from config import ANIO_INICIAL_HISTORICO
+            obtener_indices(
+                conn_cdse, geojson,
+                f"{ANIO_INICIAL_HISTORICO}-01-01", str(fecha_hoy),
+            )
+        except Exception as exc:
+            _log_seguro(
+                logger, "error",
+                "Error en ingesta global de índices: %s\n%s",
+                exc, traceback.format_exc(),
+            )
+
     # ── Detectar parcelas sin ciclo y promover candidatos ────────────────────
     try:
         creados, promovidos = detectar_y_crear_ciclos_pendientes(
-            temporada_activa=temporada_activa,
             fecha_hoy=fecha_hoy,
-            ventana_busqueda_dias=ventana_busqueda_dias,
             factor_sos=factor_sos,
             simulacion=simulacion,
             logger=logger,
@@ -1045,9 +945,7 @@ def ejecutar(fecha_hoy: date | str | None = None) -> dict:
             ingestadas, predicciones = _procesar_ciclo(
                 ciclo=ciclo,
                 fecha_hoy=fecha_hoy,
-                ventana_busqueda_dias=ventana_busqueda_dias,
                 factor_sos=factor_sos,
-                simulacion=simulacion,
                 logger=logger,
             )
             total_ingestadas   += ingestadas
