@@ -2,13 +2,13 @@
 import streamlit as st
 from components.graficas_series import render_series_temporales
 from components.sidebar_filtros import render_filtros_series
-from utils.queries import cargar_lista_parcelas, cargar_parcelas, cargar_datos_series
+from utils.queries import cargar_lista_parcelas, cargar_parcelas, cargar_datos_series, cargar_ciclos_historicos
 
 # ── Título ─────────────────────────────────────────────────────────────────────
 st.markdown("## 📈 Series Temporales")
 st.markdown(
     "Curvas de índices espectrales y productividad por parcela. "
-    "Los marcadores **SOS** y **POS** delimitan el período vegetativo activo."
+    "Los marcadores **SOS** y **EOS** delimitan los ciclos activos e históricos."
 )
 st.divider()
 
@@ -72,4 +72,5 @@ st.divider()
 
 # ── Gráficas ───────────────────────────────────────────────────────────────────
 datos_series = cargar_datos_series(parcela_id) if parcela_id is not None else None
-render_series_temporales(datos_series, filtros, parcela_id)
+ciclos_parcela = cargar_ciclos_historicos(id_parcela=parcela_id) if parcela_id is not None else None
+render_series_temporales(datos_series, filtros, parcela_id, ciclos=ciclos_parcela)

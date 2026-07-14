@@ -1319,3 +1319,98 @@ def guardar_datos_climaticos(
     n = len(rows)
     print(f"✅  {n} filas escritas en 'series_diarias_vpm' (campos climáticos, mode='{mode}').")
     return n
+
+
+def guardar_gpp_diario(
+    dfs_gpp: dict[str, pd.DataFrame],
+    mode: str = "append",
+) -> int:
+    """
+    Persiste el GPP diario de ``calcular_gpp_vpm`` en ``series_diarias_vpm.gpp_diario``.
+
+    El DataFrame de GPP tiene columnas con formato ``id_<parcela_id>``
+    (ej. ``id_101``, ``id_205``).  De ahí se extrae el ``id_parcela`` real.
+
+    Parámetros
+    ----------
+    dfs_gpp : dict[str, pd.DataFrame]
+        Salida de ``calcular_gpp_vpm``.  Debe contener la clave ``"GPP"``.
+        El DataFrame tiene DatetimeIndex y columnas de la forma ``id_<N>``.
+    mode : {"append", "replace"}
+        - ``"append"`` (defecto): upsert por (id_parcela, fecha).
+        - ``"replace"``: elimina filas existentes de las parcelas y fechas
+          antes de insertar.
+
+    Retorna
+    -------
+    int
+        Número de filas escritas.
+    """
+    clave = "GPP"
+    if clave not in dfs_gpp:
+        raise KeyError(
+            f"El dict debe contener '{clave}'.  Claves recibidas: {list(dfs_gpp.keys())}"
+        )
+
+    df = dfs_gpp[clave].copy()
+    if df.empty:
+        return 0
+
+    df.index = pd.to_datetime(df.index).normalize()
+    df.index.name = "fecha"
+    df.columns = df.columns.astype(str)
+
+    largo = (
+        df.reset_index()
+          .melt(id_vars="fecha", var_name="columna", value_name="gpp_diario")
+    )
+    largo = largo.dropna(subset=["gpp_diario"])
+    if largo.empty:
+        return 0
+
+    id_series = largo["columna"].str.extract(r"^id_(\d+)$")[0]
+    invalidas = id_series.isna()
+    if invalidas.any():
+        problematicas = largo.loc[invalidas, "columna"].unique().tolist()
+        raise ValueError(
+            f"No se pudo extraer id_parcela de las columnas: {problematicas}. "
+            f"Se esperan nombres con formato 'id_<N>'."
+        )
+    largo["id_parcela"] = id_series.astype(int)
+    largo["fecha"] = largo["fecha"].dt.strftime("%Y-%m-%d")
+
+    rows = list(
+        largo[["id_parcela", "fecha", "gpp_diario"]]
+        .astype(object)
+        .itertuples(index=False, name=None)
+    )
+
+    from contextlib import closing
+    from utils.conexionDB import get_connection_raw
+
+    sql_upsert = """
+        INSERT INTO series_diarias_vpm
+            (id_parcela, fecha, gpp_diario)
+        VALUES (?, ?, ?)
+        ON CONFLICT (id_parcela, fecha) DO UPDATE SET
+            gpp_diario = COALESCE(
+                series_diarias_vpm.gpp_diario,
+                excluded.gpp_diario
+            )
+    """
+
+    with closing(get_connection_raw()) as conn:
+        with conn:
+            if mode == "replace":
+                parcelas = largo["id_parcela"].unique().tolist()
+                fecha_min, fecha_max = largo["fecha"].min(), largo["fecha"].max()
+                placeholders = ",".join(["?"] * len(parcelas))
+                conn.execute(
+                    f"""DELETE FROM series_diarias_vpm
+                        WHERE id_parcela IN ({placeholders})
+                          AND fecha BETWEEN ? AND ?""",
+                    (*parcelas, fecha_min, fecha_max),
+                )
+            conn.executemany(sql_upsert, rows)
+
+    return len(rows)

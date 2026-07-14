@@ -103,8 +103,11 @@ def render_filtros_series() -> dict:
 
     st.markdown("---")
     st.markdown("**Marcadores fenológicos**")
-    mostrar_sos = st.checkbox("SOS — inicio de temporada", value=True)
-    mostrar_pos = st.checkbox("POS — pico de temporada",   value=True)
+    mostrar_sos = st.checkbox("SOS — inicio de temporada",    value=True)
+    mostrar_eos = st.checkbox("EOS — fin de temporada",       value=True)
+    mostrar_t1  = st.checkbox("T1 — ventana temprana",        value=False)
+    mostrar_t2  = st.checkbox("T2 — floración",               value=False)
+    mostrar_t3  = st.checkbox("T3 — llenado de grano",        value=False)
 
     color = COLORES_CICLO[ciclo]
     st.markdown(
@@ -118,11 +121,19 @@ def render_filtros_series() -> dict:
         unsafe_allow_html=True,
     )
 
+    st.divider()
+    if st.button("🔄 Limpiar caché", use_container_width=True, help="Recarga los datos desde la base de datos"):
+        st.cache_data.clear()
+        st.rerun()
+
     return {
         "ciclo":        ciclo,
         "indices":      indices,
         "mostrar_sos":  mostrar_sos,
-        "mostrar_pos":  mostrar_pos,
+        "mostrar_eos":  mostrar_eos,
+        "mostrar_t1":   mostrar_t1,
+        "mostrar_t2":   mostrar_t2,
+        "mostrar_t3":   mostrar_t3,
     }
 
 

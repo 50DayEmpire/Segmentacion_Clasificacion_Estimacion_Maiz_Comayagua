@@ -335,7 +335,7 @@ def _accion_ingesta_clima() -> None:
     from pipeline.ingesta import obtener_clima
     dfs = obtener_clima(conn, geojson, fecha_inicio, fecha_fin)
     df_t = dfs["temperature-mean"]
-    _ok(f"Clima listo: {df_t.shape[0]} fechas × {df_t.shape[1]} parcelas.")
+    _ok(f"Clima listo: {df_t.shape[0]} fechas x {df_t.shape[1]} parcelas.")
     _pausar()
 
 def _accion_ingesta_completa() -> None:

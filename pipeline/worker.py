@@ -224,6 +224,12 @@ def _conectar_openeo_cdse():
     return openeo.connect(f"https://{OPENEO}").authenticate_oidc()
 
 
+def _conectar_openeo_fed():
+    import openeo
+    from config import OPENEOFED
+    return openeo.connect(f"https://{OPENEOFED}").authenticate_oidc()
+
+
 def _calcular_ventana_ingesta(
     id_parcela: int,
     fecha_hoy: date,
@@ -338,6 +344,7 @@ def _procesar_ciclo(
     ciclo: dict,
     fecha_hoy: date,
     factor_sos: float,
+    simulacion: bool,
     logger: logging.Logger,
 ) -> tuple[int, int]:
     """Orquesta el procesamiento de un ciclo activo. Retorna (ingestadas, predicciones)."""
@@ -503,14 +510,13 @@ def _calcular_ventana_busqueda_candidato(
         fecha_ini = fecha_hoy
     return ultimo_eos, fecha_ini.strftime("%Y-%m-%d"), fecha_hoy.strftime("%Y-%m-%d")
 
-def _calcular_fechas_ciclo(sos_date: date) -> dict[str, date]:
+def _calcular_fechas_ciclo(sos_date: date) -> dict[str, date | None]:
     from config import DIAS_VENTANAS
-    """Deriva t1/t2/t3/eos de forma determinística a partir de SOS."""
     return {
         "t1":  sos_date + timedelta(days=DIAS_VENTANAS["T1"]),
         "t2":  sos_date + timedelta(days=DIAS_VENTANAS["T2"]),
         "t3":  sos_date + timedelta(days=DIAS_VENTANAS["T3"]),
-        "eos": sos_date + timedelta(days=DIAS_VENTANAS["EOS"]),
+        "eos": None,  # ciclo no ha terminado; se define en seed offline
     }
 
 
@@ -652,6 +658,11 @@ def detectar_y_crear_ciclos_pendientes(
                 eos_date = fechas_ciclo["eos"]
                 temporada_asignada = _temporada_por_sos(sos_date)
 
+                from config import DIAS_VENTANAS as _DV
+                eos_para_overlap = (
+                    eos_date if eos_date is not None
+                    else sos_date + timedelta(days=_DV["EOS"])
+                )
                 sql_overlap = """
                     SELECT COUNT(*) FROM produccion_acumulada_ciclo
                     WHERE id_parcela = ?
@@ -665,14 +676,14 @@ def detectar_y_crear_ciclos_pendientes(
                 with closing(get_connection_raw()) as conn:
                     overlap = conn.execute(
                         sql_overlap,
-                        (id_parcela, str(sos_date), str(eos_date)),
+                        (id_parcela, str(sos_date), str(eos_para_overlap)),
                     ).fetchone()[0]
                 if overlap > 0:
                     _log_seguro(
                         logger, "warning",
-                        "Solapamiento detectado para id_parcela=%s (sos=%s, eos=%s). "
+                        "Solapamiento detectado para id_parcela=%s (sos=%s). "
                         "No se crea candidato.",
-                        id_parcela, sos_date, eos_date,
+                        id_parcela, sos_date,
                     )
                     continue
 
@@ -699,8 +710,10 @@ def detectar_y_crear_ciclos_pendientes(
                         cursor = conn.execute(sql_insert, (
                             id_parcela, temporada_asignada, lswi_max_val, str(sos_date),
                             str(fechas_ciclo["t1"]), str(fechas_ciclo["t2"]),
-                            str(fechas_ciclo["t3"]), str(eos_date),
-                            prev_eos_por_parcela[id_parcela], str(eos_date),
+                            str(fechas_ciclo["t3"]),
+                            fechas_ciclo["eos"],  # None → ciclo no terminado
+                            prev_eos_por_parcela[id_parcela],
+                            fechas_ciclo["eos"],  # None → fecha_fin también
                         ))
                         nuevo_id_ciclo = cursor.lastrowid
 
@@ -708,7 +721,7 @@ def detectar_y_crear_ciclos_pendientes(
                 _log_seguro(
                     logger, "info",
                     "Candidato creado: id_parcela=%s temporada=%s sos=%s eos=%s id_ciclo=%s",
-                    id_parcela, temporada_asignada, sos_date, eos_date, nuevo_id_ciclo,
+                    id_parcela, temporada_asignada, sos_date, fechas_ciclo["eos"], nuevo_id_ciclo,
                 )
 
             except Exception as exc:
@@ -894,6 +907,21 @@ def ejecutar(fecha_hoy: date | str | None = None) -> dict:
                 exc, traceback.format_exc(),
             )
 
+        # ── Ingesta climática AgERA5 (backend federado) ──────────────────────
+        try:
+            conn_fed = _conectar_openeo_fed()
+            from pipeline.ingesta import obtener_clima
+            obtener_clima(
+                conn_fed, geojson,
+                f"{ANIO_INICIAL_HISTORICO}-01-01", str(fecha_hoy),
+            )
+        except Exception as exc:
+            _log_seguro(
+                logger, "error",
+                "Error en ingesta climática: %s\n%s",
+                exc, traceback.format_exc(),
+            )
+
     # ── Detectar parcelas sin ciclo y promover candidatos ────────────────────
     try:
         creados, promovidos = detectar_y_crear_ciclos_pendientes(
@@ -946,6 +974,7 @@ def ejecutar(fecha_hoy: date | str | None = None) -> dict:
                 ciclo=ciclo,
                 fecha_hoy=fecha_hoy,
                 factor_sos=factor_sos,
+                simulacion=simulacion,
                 logger=logger,
             )
             total_ingestadas   += ingestadas

@@ -416,9 +416,10 @@ def seed_series_historicas(
                     sos_fecha=sos_fecha,
                     fecha_inicio=inicio,
                     fecha_fin=fin,
+                    eos_fecha=fin,
                 )
                 ciclos_creados += 1
-                eos_fecha_calc = sos_fecha + pd.Timedelta(days=DIAS_VENTANAS["eos"])
+                eos_fecha_calc = sos_fecha + pd.Timedelta(days=DIAS_VENTANAS["EOS"])
                 ciclos_creados_info.append({
                     "id_ciclo": id_ciclo,
                     "id_parcela": id_parcela,

@@ -748,6 +748,13 @@ def ejecutar_prediccion_ventana(
     )
 
     dfs_gpp = calcular_gpp_vpm(dfs_vegetacion=dfs_veg_ext, dfs_clima=dfs_clima_ext)
+
+    try:
+        from pipeline.ingesta import guardar_gpp_diario
+        guardar_gpp_diario(dfs_gpp)
+    except Exception as exc:
+        _log_pred.warning("[GPP] No se pudo persistir GPP diario: %s", exc)
+
     df_gpp_recortado = dfs_gpp["GPP"].loc[sos_ts:eos_ts]
 
     _log_pred.debug(

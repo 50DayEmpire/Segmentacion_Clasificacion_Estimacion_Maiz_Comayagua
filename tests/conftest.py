@@ -2,7 +2,6 @@
 import sqlite3
 import pytest
 from pathlib import Path
-from utils.db import actualizar_gpkg
 
 @pytest.fixture
 def conn_prueba(tmp_path, monkeypatch):
