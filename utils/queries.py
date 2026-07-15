@@ -163,7 +163,7 @@ def cargar_ciclos_historicos(
         SELECT id_ciclo, id_parcela, temporada, sos,
                t1, t2, t3, eos,
                rendimiento, produccion_total, lswi_max, estado_ciclo,
-               fecha_inicio, fecha_fin
+               clasificacion_final, fecha_inicio, fecha_fin
         FROM produccion_acumulada_ciclo
         {where}
         ORDER BY sos, id_parcela

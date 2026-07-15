@@ -69,6 +69,7 @@ def actualizar_gpkg(
         except Exception:
             ultimo_id = -1
         gdf["id_parcela"] = range(ultimo_id + 1, ultimo_id + 1 + len(gdf))
+        gdf = gdf[["id_parcela", "geometry", "area_m2", "area_ha"]]
 
     modo_pyogrio = "w" if mode == "replace" else "a"
 
@@ -208,6 +209,24 @@ def _crear_tablas_sql(conn: sqlite3.Connection) -> None:
             version           INTEGER NOT NULL DEFAULT 1,
             PRIMARY KEY (id_patron AUTOINCREMENT),
             UNIQUE (subtipo, dia_post_sos, version)
+        );
+    """)
+    
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS perfil_tipicidad_maiz (
+            id_perfil           INTEGER PRIMARY KEY AUTOINCREMENT,
+            version              INTEGER NOT NULL,
+            dia_corte            INTEGER NOT NULL,              -- 30, 42, 60 (T1/T2/T3)
+            ids_parcelas_usadas  TEXT NOT NULL,                  -- JSON: [2,3,4,5,6,10,11,18]
+            n_muestras           INTEGER NOT NULL,
+            nombres_features      TEXT NOT NULL,                  -- JSON: ["max_evi_temp","max_velocidad",...]
+            scaler_mean           TEXT NOT NULL,                  -- JSON: array de 6 floats (StandardScaler.mean_)
+            scaler_scale           TEXT NOT NULL,                  -- JSON: array de 6 floats (StandardScaler.scale_)
+            centroide             TEXT NOT NULL,                  -- JSON: array de 6 floats (LedoitWolf.location_)
+            matriz_precision      TEXT NOT NULL,                  -- JSON: matriz 6x6 (LedoitWolf.precision_)
+            shrinkage             REAL NOT NULL,
+            fecha_calculo          TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE (version, dia_corte)
         );
     """)
 

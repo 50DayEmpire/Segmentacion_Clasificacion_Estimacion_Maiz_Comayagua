@@ -567,6 +567,13 @@ def seed_historico_offline(
     log.info("[GEAR] Suavizando EVI con Whittaker-Eilers...")
     df_evi = dfs_indices["EVI"].copy()
 
+    # ── Guardar rango con datos reales por parcela (pre-Whittaker) ──────
+    rango_valido_por_parcela: dict[str, tuple[pd.Timestamp, pd.Timestamp]] = {}
+    for col in df_evi.columns:
+        s = df_evi[col].dropna()
+        if not s.empty:
+            rango_valido_por_parcela[col] = (s.index.min(), s.index.max())
+
     df_evi = df_evi.mask((df_evi < -1.0) | (df_evi > 1.0), np.nan)
 
     rango_diario = pd.date_range(
@@ -595,6 +602,13 @@ def seed_historico_offline(
             continue
 
         serie = df_evi[col].dropna()
+        if serie.empty:
+            continue
+
+        # ── Truncar al rango con datos reales (evita valles artificiales de Whittaker) ──
+        if col in rango_valido_por_parcela:
+            ini_raw, fin_raw = rango_valido_por_parcela[col]
+            serie = serie.loc[ini_raw:fin_raw]
         if serie.empty:
             continue
 

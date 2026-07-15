@@ -79,14 +79,38 @@ def _get_conn() -> sqlite3.Connection:
     from utils.conexionDB import get_connection_raw
     return get_connection_raw()
 
-def _cargar_geojson_parcelas() -> dict:
-    """Lee parcelas vigentes del gpkg activo y retorna GeoJSON dict."""
+def _cargar_geojson_parcelas(ids_parcelas: list[int] | None = None) -> dict:
+    """Lee parcelas vigentes del gpkg activo y retorna GeoJSON dict.
+
+    Si se especifica ``ids_parcelas``, filtra solo esas parcelas.
+    """
     import geopandas as gpd
     from config import LAYERS_GPKG
     from utils.conexionDB import get_db_path
     gdf = gpd.read_file(str(get_db_path()), layer=LAYERS_GPKG["parcelas"])
+    if ids_parcelas is not None:
+        gdf = gdf[gdf["id_parcela"].isin(ids_parcelas)].copy()
+        if gdf.empty:
+            _warn("Ninguna de las parcelas especificadas existe en la BD.")
+            _pausar()
+            return _cargar_geojson_parcelas()
     gdf = gdf.to_crs("EPSG:4326")
     return json.loads(gdf.to_json())
+
+def _preguntar_ids_parcelas() -> list[int]:
+    """Muestra parcelas disponibles y pide IDs separados por coma."""
+    from utils.conexionDB import get_db_path
+    from config import LAYERS_GPKG
+    import geopandas as gpd
+    gdf = gpd.read_file(str(get_db_path()), layer=LAYERS_GPKG["parcelas"])
+    print(f"\n  Parcelas disponibles ({len(gdf)}):")
+    print(f"  IDs: {', '.join(str(int(pid)) for pid in sorted(gdf['id_parcela'].tolist()))}")
+    raw = input("\n  IDs a procesar (separados por coma): ").strip()
+    ids = [int(x.strip()) for x in raw.split(",") if x.strip()]
+    if not ids:
+        _warn("Debes especificar al menos un ID.")
+        return _preguntar_ids_parcelas()
+    return ids
 
 def _conectar_openeo_cdse() -> object:
     """Conexión al backend CDSE — Sentinel-2, índices espectrales."""
@@ -304,6 +328,7 @@ def _menu_ingesta() -> None:
             "indices": "Sincronizar índices EVI/LSWI (BD + openEO si hay gaps)",
             "clima":   "Sincronizar datos climáticos AgERA5 (BD + openEO si hay gaps)",
             "ambos":   "Sincronizar ambos (índices + clima)",
+            "resync":  "Resincronizar índices para parcelas específicas (salta gap detection)",
         })
         if key == "0":
             return
@@ -313,6 +338,8 @@ def _menu_ingesta() -> None:
             _accion_ingesta_clima()
         elif key == "ambos":
             _accion_ingesta_completa()
+        elif key == "resync":
+            _accion_ingesta_resync()
 
 def _accion_ingesta_indices() -> None:
     _seccion("Sincronizar índices EVI/LSWI  [BD primero → openEO solo para gaps]")
@@ -353,6 +380,19 @@ def _accion_ingesta_completa() -> None:
     conn_fed = _conectar_openeo_fed()
     dfs_clima = obtener_clima(conn_fed, geojson, fecha_inicio, fecha_fin)
     _ok(f"Clima listo: {dfs_clima['temperature-mean'].shape[0]} fechas × {dfs_clima['temperature-mean'].shape[1]} parcelas.")
+    _pausar()
+
+def _accion_ingesta_resync() -> None:
+    _seccion("Resincronizar índices EVI/LSWI para parcelas específicas")
+    ciclo = _elegir_ciclo()
+    fecha_inicio, fecha_fin = _pedir_fechas(ciclo)
+    ids = _preguntar_ids_parcelas()
+    geojson = _cargar_geojson_parcelas(ids)
+    conn = _conectar_openeo_cdse()
+    from pipeline.ingesta import resincronizar_indices_parcelas
+    dfs = resincronizar_indices_parcelas(conn, geojson, fecha_inicio, fecha_fin)
+    df_evi = dfs["EVI"]
+    _ok(f"Resincronización lista: {df_evi.shape[0]} fechas × {df_evi.shape[1]} parcelas.")
     _pausar()
 
 def _elegir_ciclo() -> str:
@@ -1266,6 +1306,10 @@ def _accion_worker_configurar() -> None:
         except ValueError:
             _warn(f"'{raw}' no es un número válido.")
 
+    # clasificar
+    raw = _pedir("clasificar (true/false)", str(cfg.get("clasificar", True)).lower())
+    cfg["clasificar"] = raw.lower() in ("true", "1", "s", "si", "yes")
+
     scheduler_cambio = (
         cfg.get("activo") != cfg_original.get("activo")
         or cfg.get("hora_ejecucion") != cfg_original.get("hora_ejecucion")
@@ -1333,6 +1377,7 @@ def _accion_worker_estado() -> None:
         prox = prox or "—"
     en_sched = worker_mod.esta_registrado_en_scheduler()
 
+    clasificar = cfg.get("clasificar", True)
     print()
     print(f"  Estado activo          : {'✅ Activo' if activo else '❌ Inactivo'}")
     print(f"  Hora de ejecución      : {hora}")
@@ -1340,6 +1385,7 @@ def _accion_worker_estado() -> None:
     print(f"  Última ejecución ok    : {ult_ok}")
     print(f"  Próxima ejecución      : {prox}")
     print(f"  En Windows Scheduler   : {'✅ Sí' if en_sched else '❌ No'}")
+    print(f"  Clasificación activa   : {'✅ Sí' if clasificar else '❌ No'}")
     _pausar()
 
 

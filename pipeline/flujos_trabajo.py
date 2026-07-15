@@ -633,6 +633,7 @@ def ejecutar_prediccion_ventana(
     ventana: str,
     fecha_hoy: date | None = None,
     lambda_param: float = 4000.0,
+    clasificar: bool = True,
 ) -> dict | None:
     """
     Orquesta la predicción de rendimiento para una ventana T1/T2/T3
@@ -789,6 +790,7 @@ def ejecutar_prediccion_ventana(
         fecha_ventana=fecha_ventana.date(),
         dfs_vpm_por_parcela=dfs_vpm_por_parcela,
         fecha_hoy=fecha_hoy,
+        clasificar=clasificar,
     )
 
     if resultado is None:
@@ -888,6 +890,7 @@ def recalcular_en_memoria(
         dfs_vpm_por_parcela=dfs_vpm_por_parcela,
         fecha_hoy=nuevo_eos,
         persistir=False,
+        clasificar=False,
     )
 
 

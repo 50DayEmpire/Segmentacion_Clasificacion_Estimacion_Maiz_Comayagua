@@ -763,6 +763,29 @@ def obtener_indices_por_lotes(
     return acumulado
 
 
+def resincronizar_indices_parcelas(
+    connection: openeo.Connection,
+    geojson_openeo: dict,
+    fecha_inicio: str,
+    fecha_fin: str,
+    config_cloud_mask: dict | None = None,
+) -> dict[str, pd.DataFrame]:
+    """
+    Descarga índices EVI/LSWI desde openEO para las parcelas indicadas
+    en el GeoJSON, sin pasar por la lógica de gaps. Útil para parcelas
+    nuevas que nunca se ingestaron. El GeoJSON debe venir YA filtrado
+    solo con las parcelas objetivo.
+    """
+    print(f"🔁  Resincronizando {len(geojson_openeo.get('features', []))} parcela(s) "
+          f"[{fecha_inicio} → {fecha_fin}] (sin gap detection)...")
+    dfs = obtener_datacube_indices_crudo(connection, geojson_openeo, fecha_inicio, fecha_fin, config_cloud_mask)
+    if all(df.empty for df in dfs.values()):
+        print("  ⚠️  Sin datos retornados desde openEO.")
+        return dfs
+    guardar_indices_crudos(dfs, mode="append")
+    return cargar_indices_desde_bd(fecha_inicio=fecha_inicio, fecha_fin=fecha_fin)
+
+
 def obtener_clima_por_lotes(
     connection: openeo.Connection,
     geojson_openeo: dict,

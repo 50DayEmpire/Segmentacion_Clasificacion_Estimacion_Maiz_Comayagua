@@ -1,142 +1,235 @@
-Resumen de arquitectura — Observatorio Maíz, Valle de Comayagua
-Contexto del proyecto
-Tesis de Ingeniería en Sistemas: estimación temprana de rendimiento de maíz en el Valle de Comayagua, Honduras, usando imágenes Sentinel-2 gratuitas. El sistema tiene tres etapas de pipeline (segmentación SAMGeo → clasificación Random Forest → estimación VPM) y un observatorio web Streamlit como capa de visualización.
+# Handoff — Observatorio Maíz, Valle de Comayagua
 
-Unidades de rendimiento en toda la UI: quintales (qq/ha y qq/parcela). Nunca toneladas métricas.
+## Contexto del proyecto
 
-Estructura de carpetas
-raíz/
-├── app.py                        # Entrypoint Streamlit (st.navigation)
-├── main.py                       # Script de seeding (correr con Streamlit detenido)
-├── config.py                     # Todas las constantes — NO hardcodear en páginas
-├── pages/
-│   ├── inicio.py                 # Página de bienvenida
-│   ├── 1_Parcelas.py             # Mapa interactivo
-│   ├── 2_Series_Temporales.py    # Curvas EVI/LSWI/GPP
-│   ├── 3_Estimacion.py           # Estimado vs referencia SAG/CAN
-│   └── 4_Resumen_Valle.py        # Producción total + métricas validación
-├── components/
-│   ├── estilos.py                # CSS global — inyectar_estilos()
-│   ├── sidebar_filtros.py        # Controles del sidebar por vista
-│   ├── mapa_parcelas.py          # Render del mapa Folium
-│   ├── graficas_series.py        # Plotly: EVI/LSWI/GPP
-│   ├── graficas_estimacion.py    # Plotly: dispersión + barras por ventana
-│   └── graficas_resumen.py       # Plotly: histograma + mapa de calor
-├── utils/
-│   ├── conexionDB.py             # get_connection() con caché / get_connection_raw() sin caché
-│   ├── db.py                     # actualizar_gpkg() + seeding()
-│   ├── queries.py                # cargar_parcelas() + cargar_municipio() con @st.cache_data
-│   ├── capas_folium.py           # agregar_capa_poligonos() — función pura reutilizable
-│   ├── dict_a_dataframe.py       # openeo_dict_to_dataframes()
-│   ├── descargar_datacube.py     # descargar_datacube()
-│   ├── aplicar_whittaker.py      # suavizador Whittaker-Eilers
-│   ├── visualizar_datacube.py    # visualización de datacubes
-│   ├── detectarVectores.py       # detectar_vectores()
-│   └── kml_a_geojson.py          # kml_a_geojson()
-├── pipeline/
-│   ├── __init__.py
-│   └── ingesta.py                # obtener_datacube_indices_crudo()
-├── data/
-│   ├── pipeline.gpkg             # Base de datos principal (SQLite/GeoPackage)
-│   └── PoligonosMaizPlayitas.geojson  # GeoJSON fuente para el seeding
-├── static/
-│   └── ComayaguaMunicipio.geojson     # Polígono del municipio (área de estudio)
-└── .streamlit/
-    └── config.toml               # Tema oscuro — NO modificar sin necesidad
-Base de datos (
-pipeline.gpkg
-)
-Archivo SQLite con extensión GeoPackage. Tiene dos tipos de contenido:
+Tesis de Ingeniería en Sistemas: estimación temprana de rendimiento de maíz en el Valle de Comayagua, Honduras, usando imágenes Sentinel-2 gratuitas y el modelo VPM (Vegetation Photosynthesis Model). El sistema tiene cuatro etapas de pipeline:
 
-Capas vectoriales (escritas con geopandas/pyogrio):
+1. **Segmentación** — SAMGeo para delimitar parcelas agrícolas
+2. **Clasificación fenológica** — Score compuesto (Pearson + pendiente de verdor) contra patrones de referencia de maíz grano (rápido/lento)
+3. **Estimación VPM** — GPP → NPP → biomasa → rendimiento (qq/ha, qq/parcela)
+4. **Observatorio web** — Streamlit con mapa Folium, series temporales EVI/LSWI/GPP, estimaciones por ventana T1/T2/T3/EOS
 
-Clave en LAYERS_GPKG	Nombre real en el archivo	Estado
-"parcelas"	"parcelas_vigentes"	✅ Poblada con 9 parcelas
-"ciclos"	"ciclos"	⏳ Pendiente
-"gpp_diario"	"gpp_diario"	⏳ Pendiente
-"rendimiento"	"rendimiento"	⏳ Pendiente
-"serie_evi"	"serie_evi"	⏳ Pendiente
-"serie_lswi"	"serie_lswi"	⏳ Pendiente
-Tablas SQLite (creadas por seeding()):
+Unidades de rendimiento en toda la UI: **quintales** (qq/ha y qq/parcela). Nunca toneladas métricas.
 
-series_diarias_vpm — EVI/LSWI crudos y suavizados, temperatura, GPP diario por parcela y fecha
-produccion_acumulada_ciclo — rendimiento y producción total por parcela y ciclo
-Esquema de parcelas (parcelas_vigentes): id_parcela INTEGER, area_m2 REAL, area_ha REAL, geometry en EPSG:32616.
+---
 
-Regla crítica de Windows: geopandas/GDAL y SQLite no pueden tener el archivo abierto simultáneamente. En seeding() se escribe primero con geopandas y después se abre la conexión SQLite. Para correr main.py hay que detener Streamlit primero.
+## Stack tecnológico
 
-Reglas de programación (no negociables)
-Sin if __name__ == "__main__" en páginas ni en app.py. Solo en utils/ para pruebas desde terminal.
-Caché obligatoria: toda función que consulte la BD lleva @st.cache_data o @st.cache_resource. Están en 
-queries.py
-. Si el caché tiene datos viejos, usar el botón "🔄 Limpiar caché" en el sidebar de Parcelas o reiniciar Streamlit.
-Conexión centralizada: la conexión SQLite vive únicamente en 
-conexionDB.py
-. get_connection() para Streamlit (con caché), get_connection_raw() para scripts de terminal (sin caché, con closing()).
-Constantes en config.py: ningún valor hardcodeado en páginas o componentes.
-Separación de responsabilidades: páginas solo ensamblan, lógica de consulta en utils/, renderizado en components/.
-CRS: cálculos métricos en EPSG:32616. Reproyectar a EPSG:4326 solo al construir el mapa Folium.
-Folium sobre leafmap. st_folium() con key dinámico por ciclo/ventana/modo.
-Sin bfill()/ffill() fuera del período vegetativo. Los NaN por nubes se preservan para Whittaker.
-Funciones puras en utils/: sin llamadas a st.* (excepto decoradores de caché).
-Estado vacío siempre con st.warning() descriptivo, nunca fallo silencioso.
-Código en español técnico: variables, funciones, comentarios, docstrings y UI.
-Navegación Streamlit
-Se usa st.navigation + st.Page (método recomendado en la documentación oficial, no el método pages/ automático). app.py es el entrypoint y actúa como marco común: aplica set_page_config e inyectar_estilos() una sola vez para todas las páginas. Las páginas individuales no llaman a set_page_config ni a inyectar_estilos().
+| Categoría | Librería |
+|---|---|
+| UI | streamlit >= 1.45, streamlit-folium >= 0.25 |
+| Mapas | folium >= 0.19, shapely >= 2.1 |
+| Gráficas | plotly >= 6.0 |
+| Geodatos | geopandas >= 1.1, pyogrio, fiona |
+| BD | sqlite3 (stdlib), GeoPackage |
+| Satélite | openeo (backend CDSE + federado AgERA5) |
+| Suavizado | whittaker-eilers >= 0.2 |
+| Ajuste curvas | scipy.optimize.least_squares (doble logística) |
+| Gestor paquetes | uv (no pip directo) |
 
-Para levantar: .venv\Scripts\python.exe -m streamlit run app.py
+---
 
-Mapa interactivo (página Parcelas)
-Dos capas activas:
+## Funciones para cargar índices desde BD
 
-Municipio de Comayagua — contorno azul #3498db, relleno casi transparente, tooltip desactivado (mostrar_tooltip=False) para no interferir con la navegación del mapa.
-Parcelas segmentadas — color verde #2ecc71 (primera) o naranja #e67e22 (postrera), tooltip y popup activos.
-Botón "🎯 Centrar en área de estudio" usa st.session_state["centrar_mapa"] para hacer fit_bounds al bounding box del municipio (MUNICIPIO_BOUNDS en config.py).
+### `pipeline/ingesta.py`
 
-agregar_capa_poligonos() en 
-capas_folium.py
- es la función reutilizable para cualquier capa de polígonos. Parámetro mostrar_tooltip: bool = True para controlar el tooltip por capa.
+- **`cargar_indices_desde_bd(fecha_inicio, fecha_fin, ids_parcelas)`** → `dict{"EVI": DataFrame, "LSWI": DataFrame}` con DatetimeIndex y columnas `id_<N>`. Consulta `series_diarias_vpm`. Lanza `ValueError` si no hay datos.
 
-Pipeline de ingesta (
-ingesta.py
-)
-Nombre de la función principal: obtener_datacube_indices_crudo — no renombrar.
+- **`cargar_clima_desde_bd(fecha_inicio, fecha_fin, ids_parcelas)`** → `dict{"temperature-mean": DataFrame, "solar-radiation-flux": DataFrame}`. Broadcast automático a todas las parcelas. AgERA5 resolución ~11km.
 
-Firma:
+- **`obtener_indices(connection, geojson_openeo, fecha_inicio, fecha_fin, config_cloud_mask, forzar_descarga)`** — Con caché inteligente: consulta cobertura STAC (`cobertura_sentinel2`) y fechas `consultado=1`; solo descarga gaps de openEO. Persiste con `guardar_indices_crudos()`.
 
-def obtener_datacube_indices_crudo(
-    connection: openeo.Connection,
-    geojson_openeo: dict,
-    fecha_inicio: str,         # "YYYY-MM-DD"
-    fecha_fin: str,            # "YYYY-MM-DD"
-    config_cloud_mask: dict | None = None,
-) -> dict:  # {"EVI": DataFrame, "LSWI": DataFrame}
-El parámetro config_cloud_mask acepta cualquier subconjunto de estas claves (las ausentes usan el default):
+- **`obtener_clima(connection, geojson_openeo, fecha_inicio, fecha_fin, num_parc, forzar_descarga)`** — Análogo para clima AgERA5 con detección de gaps.
 
-Clave	Default	Descripción
-kernel1_size	21	Kernel px, primera dilatación
-kernel2_size	59	Kernel px, segunda dilatación
-mask1_values	[2,4,5,6,7]	Clases SCL primera máscara
-mask2_values	[3,8,9,10,11]	Clases SCL segunda máscara
-erosion_kernel_size	3	Kernel px, erosión de bordes
-Los defaults viven en _CLOUD_MASK_DEFAULTS a nivel de módulo. El merge se hace con {**_CLOUD_MASK_DEFAULTS, **(config_cloud_mask or {})}.
+- **`obtener_datacube_indices_crudo(connection, geojson_openeo, fecha_inicio, fecha_fin, config_cloud_mask)`** — Descarga directa openEO (sin caché). Pipeline: máscara SCL dilation → bandas B02/B04/B08/B11 → corrección DN a reflectancia `(x + BOA_OFFSET) / ESCALA` → mask → interpolación temporal → cálculo EVI/LSWI → reducción zonal media.
 
-Retorna dict[str, pd.DataFrame] con DatetimeIndex × columnas de parcelas. Los NaN se preservan — el suavizador Whittaker los gestiona en la etapa siguiente.
+- **`obtener_datos_climaticos_crudo(...)`** — Descarga AgERA5 directa (temperature-mean, solar-radiation-flux). Broadcast regional.
 
-Datos geoespaciales
-Parcelas de estudio: 9 polígonos, Valle de Comayagua, Honduras. Bounds EPSG:4326: [-87.705, 14.409, -87.687, 14.439].
-Municipio de Comayagua: 1 polígono, 
-ComayaguaMunicipio.geojson
-. Columnas: NOMBRE, COD_MUNI, superf_ha, Area_Km2. Bounds EPSG:4326: [-87.897, 14.357, -87.385, 14.597]. Centro: lat=14.477, lon=-87.641.
-CRS nativo de ambos archivos: EPSG:32616 (UTM zona 16N).
-Stack tecnológico
-Categoría	Librería
-UI	streamlit >= 1.45, streamlit-folium >= 0.25
-Mapas	folium >= 0.19, shapely >= 2.1
-Gráficas	plotly >= 6.0
-Geodatos	geopandas >= 1.1, pyogrio (backend), fiona
-BD	sqlite3 (stdlib), GeoPackage
-Satélite	openeo (CDSE backend)
-ML (pendiente)	scikit-learn >= 1.9
-Suavizado	whittaker-eilers >= 0.2
-Gestor de paquetes	uv (no pip directo)
+- **`guardar_indices_crudos(dfs, mode)`** / **`guardar_datos_climaticos(dfs, ids_parcelas, mode)`** / **`guardar_gpp_diario(dfs_gpp, mode)`** — Persisten en `series_diarias_vpm` con upsert. `mode="replace"` borra solo el rango de parcelas/fechas afectadas.
+
+- **`resincronizar_indices_parcelas(...)`** — Descarga completa sin gap detection, para parcelas nuevas.
+
+### `utils/queries.py` (con caché Streamlit)
+
+- **`cargar_parcelas(layer="parcelas_vigentes")`** → `GeoDataFrame` en EPSG:4326.
+- **`cargar_lista_parcelas()`** → `list[int]` de id_parcela.
+- **`cargar_datos_series(parcela_id)`** → `dict{"raw": {...}, "smoothed": {...}}` con EVI/LSWI. Usa `cargar_indices_desde_bd` + `preprocesar_indices_vpm`.
+- **`cargar_ciclos_historicos(anio, temporada, id_parcela)`** → `DataFrame` de `produccion_acumulada_ciclo`.
+- **`cargar_predicciones_ciclo(id_ciclo)`** → `DataFrame` de `predicciones_ventana`.
+- **`cargar_indices_suavizados(id_ciclo)`** → `DataFrame` de `indices_suavizados`.
+- **`cargar_indices_crudos(id_parcela, fecha_inicio, fecha_fin)`** → `DataFrame` de `series_diarias_vpm`.
+- **`cargar_extrapolacion_prediccion(id_prediccion)`** → `dict{"EVI": Series, "LSWI": Series}` de `series_extrapoladas_ventana`.
+- **`cargar_ciclos_no_finalizados(temporada)`** → Ciclos `candidato`/`activo` con scores de clasificación.
+- **`cargar_municipio()`** → `GeoDataFrame` del municipio desde GeoJSON estático.
+
+---
+
+## Función de suavizado (Whittaker-Eilers)
+
+### `utils/aplicar_whittaker.py`
+
+```python
+aplicar_whittaker_series(diccionario_dfs, lambda_param=10000.0, orden=2) -> dict
+```
+
+- Recibe `dict[str, pd.DataFrame]` con DatetimeIndex diario (NaN en días sin datos).
+- Procesa parcela por parcela (columna por columna).
+- Pesos: 0 para NaN, 1 para valores válidos.
+- Si una parcela tiene menos de `orden+1` observaciones válidas, fallback a interpolación lineal.
+- Retorna mismo dict con series suavizadas y sin NaN.
+
+### Parámetros típicos
+
+| Contexto | lambda_param | orden |
+|---|---|---|
+| Pipeline VPM (`modulo_vpm.py`) | 4000.0 | 2 |
+| Visualización independiente | 10000.0 | 2 |
+
+### `pipeline/modulo_vpm.py`
+
+**`preprocesar_indices_vpm(dfs_vpm_crudos, lambda_param=4000.0, lswi_max=None)`** → Flujo completo:
+1. Filtra valores atípicos (EVI/LSWI fuera de [-1, 1])
+2. Reindexa a diario (NaN en días sin dato)
+3. Suaviza con `aplicar_whittaker_series(lambda=lambda_param)`
+4. Calcula W_scalar = (1 + LSWI) / (1 + LSWI_max)
+5. Calcula FPAR = 1.0 * EVI
+6. Retorna `{"EVI", "LSWI", "FPAR", "W_scalar"}`
+
+---
+
+## Esquema de Base de Datos (`pipeline.gpkg`)
+
+### Capas vectoriales (GeoPackage, escritas con geopandas/pyogrio)
+
+| Clave LAYERS_GPKG | Nombre real | Estado | Columnas |
+|---|---|---|---|
+| `parcelas` | `parcelas_vigentes` | ✅ | id_parcela INTEGER, area_ha REAL, area_m2 REAL, geometry (EPSG:32616) |
+| `ciclos` | `ciclos` | ⏳ | — |
+| `gpp_diario` | `gpp_diario` | ⏳ | — |
+| `rendimiento` | `rendimiento` | ⏳ | — |
+| `serie_evi` | `serie_evi` | ⏳ | — |
+| `serie_lswi` | `serie_lswi` | ⏳ | — |
+
+### Tablas SQLite (creadas por `_crear_tablas_sql()` en `utils/db.py`)
+
+**`series_diarias_vpm`** — Tabla central de series temporales
+| Columna | Tipo | Descripción |
+|---|---|---|
+| id_parcela | INTEGER | FK → parcelas_vigentes |
+| fecha | DATE | |
+| evi_crudo | REAL | EVI crudo de Sentinel-2 |
+| lswi_crudo | REAL | LSWI crudo de Sentinel-2 |
+| temperatura_diaria_promedio | REAL | °C (AgERA5) |
+| radiacion_total_promedio | REAL | J/m²/día (AgERA5) |
+| gpp_diario | REAL | g C/m²/día (VPM) |
+| consultado | INTEGER | 1 = ya enviado a openEO |
+| PK | (id_parcela, fecha) | |
+
+**`lswi_maximo`** — LSWI máximo histórico por parcela/temporada
+| Columna | Tipo |
+|---|---|
+| id_parcela | INTEGER |
+| lswi_max | REAL |
+| temporada | TEXT |
+| PK | (id_parcela, temporada) |
+
+**`produccion_acumulada_ciclo`** — Ciclos de producción y rendimiento
+| Columna | Tipo |
+|---|---|
+| id_ciclo | INTEGER PK AUTOINCREMENT |
+| id_parcela | INTEGER NOT NULL |
+| temporada | TEXT (primera/postrera) |
+| lswi_max | REAL |
+| lswi_max_efectivo | REAL |
+| fecha_inicio | DATE (valle anterior) |
+| sos | DATE (start of season) |
+| t1, t2, t3 | DATE |
+| eos | DATE (end of season) |
+| fecha_fin | DATE (valle posterior) |
+| rendimiento | REAL (qq/ha) |
+| produccion_total | REAL (qq) |
+| clasificacion_final | TEXT (Maíz, Maíz - baja probabilidad, Otro, Incierto) |
+| estado_ciclo | TEXT (candidato/activo/finalizado) |
+
+**`indices_suavizados`** — EVI/LSWI post-Whittaker por ciclo
+| PK (id_ciclo, fecha) | evi, lswi |
+
+**`predicciones_ventana`** — Predicciones por ventana T1/T2/T3/EOS
+| PK (id_prediccion AUTOINCREMENT) | UNIQUE (id_ciclo, ventana) |
+| Columnas: ventana, fecha_ventana, lswi_max_efectivo_usado, gpp_acumulado, npp_acumulado, rendimiento_estimado_qq_ha, rendimiento_estimado_qq_parcela, score_pearson, score_magnitud_pendiente, score_compuesto, cultivo_predicho, fecha_congelamiento |
+
+**`series_extrapoladas_ventana`** — Tramo extrapolado de cada predicción
+| PK (id_prediccion, fecha) | evi_extrapolado, lswi_extrapolado |
+
+**`climatologia_diaria`** — Climatología AgERA5 por día del año
+| PK (id_region, variable, dia_anio) | valor_climatologico, anio_min_incluido, anio_max_incluido |
+
+**`patron_referencia_fenologico`** — Patrones de EVI para clasificación
+| PK (id_patron AUTOINCREMENT) | UNIQUE (subtipo, dia_post_sos, version) |
+| Columnas: subtipo (grano_rapido/grano_lento), dia_post_sos, evi_promedio, evi_desviacion, mediana_pendiente_verdeo, n_muestras, ids_parcelas_usadas |
+
+**`cobertura_sentinel2`** — Fechas de adquisición S2 (STAC)
+| PK (id_cobertura AUTOINCREMENT) | fecha |
+
+---
+
+## Decisiones del proyecto (reglas no negociables)
+
+### Arquitectura
+1. **Separación estricta**: páginas solo ensamblan UI, lógica en `utils/`, renderizado en `components/`.
+2. **Conexión centralizada**: toda conexión SQLite vive en `utils/conexionDB.py`. `get_connection()` / `get_connection_raw()`.
+3. **Constantes en `config.py`**: ningún valor hardcodeado en páginas o componentes.
+4. **Funciones puras en `utils/`**: sin llamadas a `st.*` excepto decoradores `@st.cache_data`.
+5. **Sin `if __name__ == "__main__"`** en páginas ni en `app.py`. Solo en `utils/` para pruebas desde terminal.
+
+### Navegación Streamlit
+- `st.navigation` + `st.Page` (método oficial). `app.py` es entrypoint único, aplica `set_page_config` e `inyectar_estilos()`.
+- Páginas individuales NO llaman a `set_page_config` ni `inyectar_estilos()`.
+
+### Datos geoespaciales
+- **CRS métrico**: EPSG:32616 (UTM 16N) para cálculos de área y distancia.
+- **CRS geográfico**: EPSG:4326 solo para Folium.
+- **Folium sobre leafmap**: `st_folium()` con key dinámico por ciclo/ventana/modo.
+- **Municipio**: contorno azul `#3498db`, tooltip desactivado. Parcelas: verde `#2ecc71` (primera), naranja `#e67e22` (postrera).
+
+### Pipeline VPM
+1. **Ingesta con caché**: STAC determina fechas de adquisición S2 reales. `consultado=1` marca lo ya enviado a openEO. Solo se descargan gaps.
+2. **Suavizado sin bfill/ffill**: NaN por nubes se preservan para Whittaker. No rellenar fuera del período vegetativo.
+3. **Whittaker**: `lambda=4000` para pipeline VPM, `lambda=10000` para visualización. Las funciones están en `utils/aplicar_whittaker.py`.
+4. **LSWI_max**: se calcula del máximo de la serie suavizada o se pasa explícito desde `lswi_maximo`.
+5. **GPP**: VPM diario con parámetros: epsilon_0=1.6 (C4), t_min=10°C, t_opt=30°C, t_max=45°C, par_fraction=0.48.
+6. **Rendimiento**: NPP = GPP * CUE (0.55). Biomasa = NPP / fraccion_carbono (0.45). Yield = biomasa * harvest_index (0.48) * 0.01 → t/ha → qq/ha (* 22.0458).
+7. **Detección SOS**: método `seasonal_amplitude` (TIMESAT). Factor=0.2. Opcional: `ventana_busqueda` y `ventana_sos` para restringir por calendario.
+
+### Clasificación fenológica (`pipeline/modulo_clasificacion.py`)
+- Compara EVI observado contra dos patrones: `grano_rapido` y `grano_lento`.
+- Score compuesto = max(0, r_pearson) * ratio_pendiente * 100.
+- Etiquetas: >= 70 → "Maíz", >= 30 → "Maíz - baja probabilidad", < 30 → "Otro".
+- Persiste en `predicciones_ventana.score_compuesto` y `produccion_acumulada_ciclo.clasificacion_final`.
+
+### Predicción por ventana (`pipeline/modulo_predictivo.py`)
+- **T1** (30d): ajuste doble logística con 4 parámetros (vmin, vmax, S, mS), A fijo en 0.7*duración, mA = 0.85*mS. Extrapolación con decaimiento exponencial (τ=10d).
+- **T2** (60d): ajuste T1 con límites relajados en S.
+- **T3** (90d): ajuste doble logística completa (6 parámetros: vmin, vmax, S, mS, A, mA).
+- **EOS** (130d): usa la serie completa observada; sin extrapolación.
+- Clima futuro se completa con climatología diaria (promedio histórico AgERA5).
+
+### Worker diario (`pipeline/worker.py`)
+- Ejecutable como `python -m pipeline.worker [--fecha YYYY-MM-DD]`.
+- Flujo: ingesta STAC/AgERA5 → detectar ciclos pendientes → promover candidatos (3 observaciones consecutivas sobre umbral) → preprocesar ciclos activos → ejecutar ventanas T1/T2/T3/EOS.
+- Configurable via `worker_config.json` (hora, temporada activa, factor SOS).
+- Se registra en Windows Task Scheduler automáticamente.
+
+### Orquestación (`pipeline/flujos_trabajo.py`)
+Cuatro flujos:
+1. `ejecutar_pipeline_completo` — end-to-end con caché BD + gaps openEO.
+2. `ejecutar_pipeline_desde_bd` — solo BD, sin conexión openEO.
+3. `calcular_rendimiento_desde_indices` — DataFrames ya en memoria.
+4. `ejecutar_prediccion_ventana` — predicción T1/T2/T3/EOS para un ciclo histórico.
+
+### Misceláneo
+- **Estado vacío**: siempre `st.warning()` descriptivo, nunca fallo silencioso.
+- **Caché viejos**: botón "🔄 Limpiar caché" en sidebar de Parcelas, o reiniciar Streamlit.
+- **Código en español técnico**: variables, funciones, comentarios, docstrings y UI.
+- **Seed histórico**: `python main.py` (correr con Streamlit detenido).
+- **Para levantar**: `.venv\Scripts\python.exe -m streamlit run app.py`

@@ -8,8 +8,11 @@ from scipy.stats import pearsonr
 import pandas as pd
 import numpy as np
 from tqdm import tqdm
-
+import json
+from sklearn.covariance import LedoitWolf
+from sklearn.preprocessing import StandardScaler
 from utils.conexionDB import get_connection_raw
+from scipy.spatial.distance import mahalanobis
 
 _log_clf = logging.getLogger(__name__)
 
@@ -364,13 +367,23 @@ def clasificar_parcela_actual(conn, id_parcela, sos_fecha, df_evi, fecha_evaluac
     fecha_evaluacion = fecha_evaluacion or pd.Timestamp.today().normalize()
     t_actual = (fecha_evaluacion - sos_fecha).days
 
-    if t_actual < 30:
-        _log_clf.debug("[CLF] Parcela %s: %d días post-SOS, no alcanza mínimo 30",
+    if t_actual < 22:
+        _log_clf.debug("[CLF] Parcela %s: %d días post-SOS, no alcanza mínimo 22",
                        id_parcela, t_actual)
-        return {"estado": "fuera_de_ventana", "motivo": f"día {t_actual} < 30, aún no alcanza ventana mínima"}
+        return {"estado": "fuera_de_ventana", "motivo": f"día {t_actual} < 22, aún no alcanza ventana mínima"}
     if t_actual > 60:
         _log_clf.debug("[CLF] Parcela %s: t_actual=%d, capado a 60", id_parcela, t_actual)
         t_actual = 60
+
+    ultimo_dia_obs = (df_evi.index.max() - sos_fecha).days
+    if ultimo_dia_obs < 22:
+        _log_clf.debug("[CLF] Parcela %s: último observado día %d, no alcanza ventana",
+                       id_parcela, ultimo_dia_obs)
+        return {"estado": "fuera_de_ventana", "motivo": f"último EVI en día {ultimo_dia_obs} < 22"}
+    if ultimo_dia_obs < t_actual:
+        _log_clf.debug("[CLF] Parcela %s: t_actual=%d, último observado día %d, capado a %d",
+                       id_parcela, t_actual, ultimo_dia_obs, ultimo_dia_obs)
+        t_actual = ultimo_dia_obs
 
     resultados = {}
     for subtipo in ["grano_rapido", "grano_lento"]:
@@ -407,3 +420,206 @@ def clasificar_parcela_actual(conn, id_parcela, sos_fecha, df_evi, fecha_evaluac
         "pendiente_obs": mejor["pendiente_obs"],
         "score_compuesto": mejor["score_compuesto"],
     }
+
+
+
+#=========================================================================================================================================================
+# NUEVA IMPLEMENTACIÓN DE CLASIFICADOR
+#=========================================================================================================================================================
+
+def extraer_features_al_dia(matriz_evi, matriz_lswi, dia_corte, indices=None):
+    """
+    Calcula 6 métricas fenológicas dinámicas para cada serie de una matriz EVI/LSWI,
+    truncando estrictamente la información al rango [0, dia_corte] (sin look-ahead).
+
+    NOTA: esta versión NO acota la ventana de cálculo de velocidad/aceleración -- las
+    derivadas se calculan sobre toda la ventana [0, dia_corte]. Es consistente con los
+    perfiles ya persistidos en `perfil_tipicidad_maiz` (version=1, días 20-60) y con
+    el LOOCV que validó T1=30 (AUC 0.9167) y T2=60 (AUC 0.8958).
+    Se observó degradación de desempeño en día 90 (T3, AUC 0.75) atribuible a esta
+    falta de acotamiento -- ver TODO más abajo. T3 queda fuera de alcance por ahora;
+    la corrección (capar a una ventana de crecimiento activo, ej. dia_max_verdeo=35)
+    queda como trabajo futuro antes de habilitar T3 en producción.
+
+    Parameters
+    ----------
+    matriz_evi : np.ndarray, shape (n_parcelas, n_dias)
+        Serie EVI diaria por parcela, alineada a SOS (columna 0 = día 0 post-SOS).
+    matriz_lswi : np.ndarray, shape (n_parcelas, n_dias)
+        Serie LSWI diaria por parcela, misma alineación que matriz_evi.
+    dia_corte : int
+        Día post-SOS (inclusive) hasta el cual se permite usar información. Las métricas
+        nunca usan datos posteriores a este día.
+    indices : list[int] o None, default None
+        Si se especifica, solo calcula features para esas filas (posiciones) de la matriz
+        -- uso recomendado en producción para evaluar una sola parcela nueva sin recalcular
+        sobre la matriz completa. Si None, calcula para todas las filas (uso exploratorio).
+
+    Returns
+    -------
+    np.ndarray, shape (n_parcelas_evaluadas, 6)
+        Columnas en este orden:
+        0. max_evi_temp            -- techo de verdor alcanzado hasta dia_corte
+        1. max_velocidad            -- máxima tasa de cambio diaria de EVI, sobre toda
+                                        la ventana [0, dia_corte]
+        2. dia_max_velocidad        -- día (índice) donde ocurre esa velocidad máxima
+        3. max_aceleracion          -- máxima segunda derivada de EVI, misma ventana
+        4. relacion_evi_lswi_final  -- razón EVI/LSWI en el último día disponible (dia_corte)
+        5. coef_correlacion_interna -- correlación EVI-LSWI sobre toda la serie [0, dia_corte]
+                                        (0.0 si la varianza de alguna serie es cero o hay NaN)
+
+    Notes
+    -----
+    Filas con NaN en cualquier punto de la ventana devuelven np.nan en las 6 columnas --
+    el llamador debe verificar `np.isnan(...).any()` antes de usar el resultado (ej. antes
+    de pasarlo a mahalanobis), en vez de asumir que siempre hay un número válido.
+
+    TODO (trabajo futuro): acotar velocidad/aceleración a una ventana de crecimiento
+    activo (ej. dia_max_verdeo≈35) para habilitar T3=90 sin degradación de AUC. Requiere
+    regenerar los perfiles de referencia y re-correr LOOCV antes de usarse en producción.
+    """
+    filas = range(len(matriz_evi)) if indices is None else indices
+    features_dia = []
+
+    for i in filas:
+        curva_e = matriz_evi[i][:dia_corte]
+        curva_l = matriz_lswi[i][:dia_corte]
+
+        if np.isnan(curva_e).any() or np.isnan(curva_l).any():
+            features_dia.append([np.nan] * 6)
+            continue
+
+        vel_evi = np.diff(curva_e) if len(curva_e) > 1 else np.array([0.0])
+        max_vel = np.max(vel_evi)
+        dia_max_vel = int(np.argmax(vel_evi))
+
+        acel_evi = np.diff(vel_evi) if len(vel_evi) > 1 else np.array([0.0])
+        max_acel = np.max(acel_evi)
+
+        evi_final = curva_e[-1]
+        lswi_final = curva_l[-1]
+        max_evi_temp = np.max(curva_e)
+
+        ratio_evi_lswi = evi_final / (lswi_final + 0.001)
+
+        with np.errstate(divide='ignore', invalid='ignore'):
+            cc = np.corrcoef(curva_e, curva_l)[0, 1]
+            cc = 0.0 if np.isnan(cc) else cc
+
+        features_dia.append([max_evi_temp, max_vel, dia_max_vel, max_acel, ratio_evi_lswi, cc])
+
+    return np.array(features_dia)
+
+def entrenar_perfil_tipicidad(dia_corte, indices_maiz, matriz_evi_100, matriz_lswi_100, df_meta_final):
+    X_maiz = extraer_features_al_dia(matriz_evi_100, matriz_lswi_100, dia_corte=dia_corte)[indices_maiz]
+    scaler = StandardScaler().fit(X_maiz)
+    X_scaled = scaler.transform(X_maiz)
+    lw = LedoitWolf().fit(X_scaled)
+
+    ids_parcelas = df_meta_final.loc[indices_maiz, 'id_parcela'].tolist()
+
+    return {
+        "dia_corte": dia_corte,
+        "ids_parcelas_usadas": ids_parcelas,
+        "n_muestras": len(indices_maiz),
+        "nombres_features": ["max_evi_temp", "max_velocidad", "dia_max_velocidad",
+                              "max_aceleracion", "relacion_evi_lswi_final", "coef_correlacion_interna"],
+        "scaler_mean": scaler.mean_.tolist(),
+        "scaler_scale": scaler.scale_.tolist(),
+        "centroide": lw.location_.tolist(),
+        "matriz_precision": lw.precision_.tolist(),
+        "shrinkage": float(lw.shrinkage_),
+    }
+
+def persistir_perfil_tipicidad(conn, perfil, version):
+    conn.execute("""
+        INSERT INTO perfil_tipicidad_maiz
+        (version, dia_corte, ids_parcelas_usadas, n_muestras, nombres_features,
+         scaler_mean, scaler_scale, centroide, matriz_precision, shrinkage)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    """, (
+        version, perfil["dia_corte"], json.dumps(perfil["ids_parcelas_usadas"]),
+        perfil["n_muestras"], json.dumps(perfil["nombres_features"]),
+        json.dumps(perfil["scaler_mean"]), json.dumps(perfil["scaler_scale"]),
+        json.dumps(perfil["centroide"]), json.dumps(perfil["matriz_precision"]),
+        perfil["shrinkage"],
+    ))
+    conn.commit()
+
+def cargar_perfil_tipicidad(conn, dia_corte, version=None):
+    """Si version=None, carga la más reciente disponible para ese dia_corte."""
+    query = """
+        SELECT * FROM perfil_tipicidad_maiz
+        WHERE dia_corte = ?
+        {}
+        ORDER BY version DESC LIMIT 1
+    """.format("AND version = ?" if version else "")
+    params = (dia_corte, version) if version else (dia_corte,)
+    row = pd.read_sql(query, conn, params=params)
+    if row.empty:
+        raise ValueError(f"No hay perfil de tipicidad para dia_corte={dia_corte}")
+    r = row.iloc[0]
+    return {
+        "version": r["version"],
+        "dia_corte": r["dia_corte"],
+        "ids_parcelas_usadas": json.loads(r["ids_parcelas_usadas"]),
+        "scaler_mean": np.array(json.loads(r["scaler_mean"])),
+        "scaler_scale": np.array(json.loads(r["scaler_scale"])),
+        "centroide": np.array(json.loads(r["centroide"])),
+        "matriz_precision": np.array(json.loads(r["matriz_precision"])),
+        "shrinkage": r["shrinkage"],
+    }
+
+def evaluar_tipicidad(id_parcela, dia_corte, perfil, matriz_evi_100, matriz_lswi_100, df_meta_final):
+    idx = df_meta_final[df_meta_final['id_parcela'] == id_parcela].index
+    if len(idx) == 0:
+        raise ValueError(f"id_parcela {id_parcela} no encontrado")
+    idx = idx[0]
+
+    x = extraer_features_al_dia(matriz_evi_100, matriz_lswi_100, dia_corte=dia_corte)[[idx]]
+    x_scaled = (x - perfil["scaler_mean"]) / perfil["scaler_scale"]  # equivalente a scaler.transform sin reinstanciar
+
+    dist = mahalanobis(x_scaled[0], perfil["centroide"], perfil["matriz_precision"])
+
+    return {
+        "id_parcela": id_parcela,
+        "dia_corte": dia_corte,
+        "version_perfil": perfil["version"],
+        "distancia_mahalanobis": dist,
+        "features_crudas": x[0].tolist(),
+    }
+
+def determinar_dia_efectivo(id_parcela, sos, dia_objetivo, df_evi, dia_minimo_aceptable):
+    """
+    Encuentra el último día con dato EVI válido (no NaN) hasta dia_objetivo.
+    Si no alcanza el mínimo aceptable, retorna None (no evaluar todavía).
+    """
+    col = f"id_{id_parcela}"
+    rango = pd.date_range(start=sos, periods=dia_objetivo + 1, freq="D")
+    try:
+        serie = df_evi.loc[rango, col].values
+    except KeyError:
+        return None
+
+    dias_validos = np.where(~np.isnan(serie))[0]
+    if len(dias_validos) == 0:
+        return None
+
+    dia_efectivo = dias_validos[-1]  # último índice con dato real
+    if dia_efectivo < dia_minimo_aceptable:
+        return None  # muy pocos datos, no vale la pena evaluar todavía
+    return dia_efectivo
+
+def evaluar_tipicidad_robusta(id_parcela, sos, dia_objetivo, df_evi, df_lswi,
+                                matriz_evi_100, matriz_lswi_100, df_meta_final,
+                                conn, version_perfil=1, dia_minimo_aceptable=20):
+    dia_efectivo = determinar_dia_efectivo(id_parcela, sos, dia_objetivo, df_evi, dia_minimo_aceptable)
+    if dia_efectivo is None:
+        return {"id_parcela": id_parcela, "estado": "datos_insuficientes", "dia_objetivo": dia_objetivo}
+
+    perfil = cargar_perfil_tipicidad(conn, dia_efectivo, version=version_perfil)
+    resultado = evaluar_tipicidad(id_parcela, dia_efectivo, perfil, matriz_evi_100, matriz_lswi_100, df_meta_final)
+    resultado["dia_objetivo"] = dia_objetivo
+    resultado["dia_efectivo"] = dia_efectivo
+    resultado["gap_dias"] = dia_objetivo - dia_efectivo
+    return resultado

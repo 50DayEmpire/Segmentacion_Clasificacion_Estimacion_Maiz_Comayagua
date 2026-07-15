@@ -38,6 +38,7 @@ WORKER_CONFIG_DEFAULTS: dict[str, Any] = {
     "hora_ejecucion":       "06:00",
     "temporada_activa":     "primera",
     "factor_sos":           0.2,
+    "clasificar":           True,
     "ultima_ejecucion":     None,
     "ultima_ejecucion_exitosa": None,
     "proxima_ejecucion":    None,
@@ -346,6 +347,7 @@ def _procesar_ciclo(
     factor_sos: float,
     simulacion: bool,
     logger: logging.Logger,
+    clasificar: bool = True,
 ) -> tuple[int, int]:
     """Orquesta el procesamiento de un ciclo activo. Retorna (ingestadas, predicciones)."""
     from contextlib import closing
@@ -414,6 +416,7 @@ def _procesar_ciclo(
             resultado = ejecutar_prediccion_ventana(
                 ciclo, ventana, fecha_ventana,
                 dfs_vpm_por_parcela, fecha_hoy,
+                clasificar=clasificar,
             )
         except RuntimeError as exc:
             _log_seguro(logger, "error", "%s", exc)
@@ -868,6 +871,7 @@ def ejecutar(fecha_hoy: date | str | None = None) -> dict:
 
     temporada_activa      = cfg.get("temporada_activa", "primera")
     factor_sos = float(cfg.get("factor_sos", 0.2))
+    clasificar = cfg.get("clasificar", True)
 
     if simulacion:
         _log_seguro(logger, "info", "MODO SIMULACIÓN — Fecha simulada: %s", fecha_hoy)
@@ -972,6 +976,7 @@ def ejecutar(fecha_hoy: date | str | None = None) -> dict:
                 factor_sos=factor_sos,
                 simulacion=simulacion,
                 logger=logger,
+                clasificar=clasificar,
             )
             total_ingestadas   += ingestadas
             total_predicciones += predicciones

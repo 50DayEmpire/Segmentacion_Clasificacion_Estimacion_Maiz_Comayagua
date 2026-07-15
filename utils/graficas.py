@@ -6,6 +6,8 @@ import pandas as pd
 from pipeline.ingesta import cargar_indices_desde_bd
 from pipeline.modulo_vpm import preprocesar_indices_vpm
 from pipeline.modulo_fenologico import segmentar_ciclos, detectar_sos
+import geopandas as gpd
+import folium
 
 
 def graficar_comparativa_whittaker_plotly(fecha_inicio, fecha_fin, indice_nombre="EVI", distancia_min_dias=90, prominencia_min=0.15):
@@ -383,3 +385,70 @@ def visualizar_parcelas_hvplot():
         title="Visualización de Parcelas"
     )
     # return gdf.explore(column="id_parcela", tooltip=["id_parcela"], width=900, height=600)
+
+def visualizar_geojson(ruta_geojson):
+    """Lee un archivo GeoJSON y lo despliega en un mapa interactivo
+
+    con capas base satelital y de calles.
+    """
+    try:
+        # 1. Leer el archivo GeoJSON
+        gdf = gpd.read_file(ruta_geojson)
+
+        # 2. Asegurar que esté en WGS84 (EPSG:4326) para que Folium pueda leerlo bien
+        if gdf.crs != "EPSG:4326":
+            gdf = gdf.to_crs(epsg=4326)
+
+        # 3. Calcular el centro geométrico de tus polígonos para enfocar el mapa automáticamente
+        centro = gdf.geometry.centroid
+        lat_centro = centro.y.mean()
+        lon_centro = centro.x.mean()
+
+        # 4. Crear el mapa base interactivo apuntando al centro de tus datos
+        m = folium.Map(location=[lat_centro, lon_centro], zoom_start=13)
+
+        # 5. Agregar capa satelital (esencial para ver tus parcelas de maíz)
+        folium.TileLayer(
+            tiles="https://mt1.google.com/vt/lyrs=s&x={x}&y={y}&z={z}",
+            attr="Google Satellite",
+            name="Google Satélite",
+            overlay=False,
+            control=True,
+        ).add_to(m)
+
+        # Agregar capa de calles estándar por si quieres alternar
+        folium.TileLayer("OpenStreetMap", name="OpenStreetMap").add_to(m)
+
+        # 6. Agregar los polígonos del GeoJSON al mapa con estilo personalizado
+        folium.GeoJson(
+            gdf,
+            name="Tus Polígonos",
+            style_function=lambda feature: {
+                "fillColor": "#22c55e",  # Verde para simular cultivo
+                "color": "#15803d",  # Borde verde oscuro
+                "weight": 2,
+                "fillOpacity": 0.4,
+            },
+            tooltip=folium.GeoJsonTooltip(
+                fields=[
+                    col
+                    for col in gdf.columns
+                    if col != "geometry" and col != "id"
+                ][:5],
+                aliases=[
+                    f"{col}:"
+                    for col in gdf.columns
+                    if col != "geometry" and col != "id"
+                ][:5],
+                localize=True,
+            ),
+        ).add_to(m)
+
+        # Control de capas para encender/apagar el satélite o tus polígonos
+        folium.LayerControl().add_to(m)
+
+        # 7. Desplegar el mapa en el Notebook
+        return m
+
+    except Exception as e:
+        print(f"Error al cargar o visualizar el GeoJSON: {e}")

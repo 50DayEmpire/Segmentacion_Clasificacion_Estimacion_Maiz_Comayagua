@@ -5,7 +5,7 @@ from contextlib import closing
 from datetime import timedelta
 from components.mapa_parcelas import render_mapa_parcelas
 from components.sidebar_filtros import render_filtros_historico
-from utils.queries import cargar_parcelas, cargar_ciclos_historicos, cargar_datos_series
+from utils.queries import cargar_parcelas, cargar_ciclos_historicos, cargar_datos_series, cargar_predicciones_ciclo
 from components.graficas_series import _figura_series
 from config import DIAS_VENTANAS, DURACION_MAX_CICLO
 from pipeline.flujos_trabajo import recalcular_en_memoria
@@ -124,6 +124,33 @@ if id_parcela_click is not None:
         else:
             id_ciclo = df_ciclos.iloc[0]["id_ciclo"]
 
+        # ── Resumen de clasificación de todos los ciclos ────────────────
+        if "clasificacion_final" in df_ciclos.columns:
+            _colores_clasif = {
+                "Maíz": "#2ecc71", "Maíz - baja probabilidad": "#f39c12",
+                "Otro": "#e74c3c", "Incierto": "#95a5a6",
+            }
+            cols_tabla = st.columns([2, 1, 1, 2, 1])
+            cols_tabla[0].markdown("**Ciclo**")
+            cols_tabla[1].markdown("**SOS**")
+            cols_tabla[2].markdown("**Rend.**")
+            cols_tabla[3].markdown("**Clasificación**")
+            cols_tabla[4].markdown("**Score**")
+            for _, r in df_ciclos.iterrows():
+                clasif = r.get("clasificacion_final")
+                color = _colores_clasif.get(clasif, "#95a5a6") if pd.notna(clasif) else "#95a5a6"
+                label = clasif if pd.notna(clasif) else "—"
+                badge = f"<span style='background:{color}; color:white; padding:0 8px; border-radius:8px; font-size:0.8rem;'>{label}</span>"
+                cols = st.columns([2, 1, 1, 2, 1])
+                cols[0].write(f"#{r['id_ciclo']}")
+                cols[1].write(r["sos"].strftime("%d/%m/%Y") if pd.notna(r.get("sos")) else "—")
+                cols[2].write(f"{r['rendimiento']:.0f}" if pd.notna(r.get("rendimiento")) else "—")
+                cols[3].markdown(badge, unsafe_allow_html=True)
+                # Obtener score compuesto de predicciones (ultima ventana)
+                _preds = cargar_predicciones_ciclo(int(r["id_ciclo"]))
+                _score = _preds["score_compuesto"].dropna()
+                cols[4].write(f"{_score.iloc[-1]:.0f}" if not _score.empty else "—")
+
         ciclo = df_ciclos[df_ciclos["id_ciclo"] == id_ciclo].iloc[0]
         ca, cb, cc, cd, ce, cf = st.columns(6)
         ca.metric("Ciclo", f"#{ciclo['id_ciclo']}")
@@ -133,6 +160,33 @@ if id_parcela_click is not None:
         ce.metric("Rendimiento", f"{ciclo['rendimiento']:.1f} qq/ha" if pd.notna(ciclo.get("rendimiento")) else "—")
         cf.metric("Producción Estimada de la Parcela", f"{ciclo['produccion_total']:.1f} qq" if pd.notna(ciclo.get("produccion_total")) else "—")
 
+        # ── Badge de clasificación ───────────────────────────────────────
+        clasif = ciclo.get("clasificacion_final")
+        if pd.notna(clasif):
+            _colores_badge = {
+                "Maíz": "#2ecc71", "Maíz - baja probabilidad": "#f39c12",
+                "Otro": "#e74c3c", "Incierto": "#95a5a6",
+            }
+            ccolor = _colores_badge.get(clasif, "#95a5a6")
+            st.markdown(
+                f"<div style='display:flex; align-items:center; gap:0.5rem; margin-top:0.5rem;'>"
+                f"<span style='font-weight:600;'>Clasificación:</span>"
+                f"<span style='background:{ccolor}; color:white; padding:0.2rem 1rem; "
+                f"border-radius:12px; font-weight:600; font-size:0.95rem;'>{clasif}</span>"
+                f"</div>",
+                unsafe_allow_html=True,
+            )
+
+            # Barra de score compuesto (última ventana con score)
+            _preds = cargar_predicciones_ciclo(int(id_ciclo))
+            _score = _preds["score_compuesto"].dropna()
+            if not _score.empty:
+                ult_score = _score.iloc[-1]
+                st.progress(int(ult_score) / 100, text=f"Score compuesto: {ult_score:.0f}/100")
+        else:
+            st.markdown("<div style='margin-top:0.5rem; color:#95a5a6;'>*Sin clasificar*</div>",
+                        unsafe_allow_html=True)
+
         if pd.notna(ciclo.get("sos")) and pd.notna(ciclo.get("eos")):
             duracion = (ciclo["eos"] - ciclo["sos"]).days
             if duracion > DURACION_MAX_CICLO:
@@ -140,15 +194,7 @@ if id_parcela_click is not None:
                            f"La duración máxima esperada es {DURACION_MAX_CICLO} días.")
 
         ventana = filtros["ventana"]
-        with closing(get_connection_raw()) as conn:
-            df_pred = pd.read_sql("""
-                SELECT id_prediccion, ventana, fecha_ventana,
-                       gpp_acumulado, npp_acumulado,
-                       rendimiento_estimado_qq_ha, rendimiento_estimado_qq_parcela
-                FROM predicciones_ventana
-                WHERE id_ciclo = ?
-                ORDER BY ventana
-            """, conn, params=(int(id_ciclo),), parse_dates=["fecha_ventana"])
+        df_pred = cargar_predicciones_ciclo(int(id_ciclo))
         fila_pred = df_pred[df_pred["ventana"] == ventana]
         id_prediccion = None
         sin_curva_evi = False
@@ -194,6 +240,20 @@ if id_parcela_click is not None:
             cd.metric("Producción Total Parcela", f"{p['rendimiento_estimado_qq_parcela']:.1f} qq" if pd.notna(p.get("rendimiento_estimado_qq_parcela")) else "—")
         else:
             st.caption("No hay predicción registrada para esta ventana.")
+
+        # ── Scores de clasificación por ventana ──────────────────────────
+        if not df_pred.empty and df_pred["score_compuesto"].notna().any():
+            with st.expander("📊 Scores de clasificación por ventana", expanded=False):
+                for _, rw in df_pred.iterrows():
+                    sc = rw.get("score_compuesto")
+                    if pd.notna(sc):
+                        c_cols = st.columns([1, 1.5, 1.5, 1.5, 2])
+                        c_cols[0].markdown(f"**{rw['ventana']}**")
+                        c_cols[1].metric("Score", f"{sc:.0f}", delta=None)
+                        c_cols[2].write(f"Pearson: {rw['score_pearson']:.3f}" if pd.notna(rw.get("score_pearson")) else "—")
+                        c_cols[3].write(f"Pendiente: {rw['score_magnitud_pendiente']:.4f}" if pd.notna(rw.get("score_magnitud_pendiente")) else "—")
+                        pred = rw.get("cultivo_predicho")
+                        c_cols[4].write(f"**{pred}**" if pd.notna(pred) else "—")
 
         st.divider()
         st.markdown("### 📈 Series temporales EVI y LSWI")

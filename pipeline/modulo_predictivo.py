@@ -598,6 +598,7 @@ def ejecutar_prediccion_ventana(
     dfs_vpm_por_parcela: dict[int, dict],
     fecha_hoy: date,
     persistir: bool = True,
+    clasificar: bool = True,
 ) -> dict | None:
     """
     Ejecuta el flujo VPM completo para una ventana T1/T2/T3 de un ciclo.
@@ -784,25 +785,26 @@ def ejecutar_prediccion_ventana(
     score_comp_val = None
     cultivo_label = None
 
-    try:
-        from pipeline.modulo_clasificacion import clasificar_parcela_actual
-        with closing(get_connection_raw()) as conn_clf:
-            res_clf = clasificar_parcela_actual(
-                conn_clf, id_parcela, sos_ts, dfs_vpm["EVI"],
-                fecha_evaluacion=pd.Timestamp(fecha_ventana),
+    if clasificar:
+        try:
+            from pipeline.modulo_clasificacion import clasificar_parcela_actual
+            with closing(get_connection_raw()) as conn_clf:
+                res_clf = clasificar_parcela_actual(
+                    conn_clf, id_parcela, sos_ts, dfs_vpm["EVI"],
+                    fecha_evaluacion=pd.Timestamp(fecha_ventana),
+                )
+            if res_clf["estado"] == "evaluado":
+                score_pearson_val = float(res_clf["r_forma"])
+                score_pend_val = float(res_clf["pendiente_obs"])
+                score_comp_val = float(res_clf["score_compuesto"])
+            _log_pred.debug(
+                "[CLF] ciclo=%d ventana=%s pearson=%.4f pend=%.4f score=%.1f",
+                id_ciclo, ventana,
+                score_pearson_val or 0, score_pend_val or 0, score_comp_val or 0,
             )
-        if res_clf["estado"] == "evaluado":
-            score_pearson_val = float(res_clf["r_forma"])
-            score_pend_val = float(res_clf["pendiente_obs"])
-            score_comp_val = float(res_clf["score_compuesto"])
-        _log_pred.debug(
-            "[CLF] ciclo=%d ventana=%s pearson=%.4f pend=%.4f score=%.1f",
-            id_ciclo, ventana,
-            score_pearson_val or 0, score_pend_val or 0, score_comp_val or 0,
-        )
-    except Exception as exc:
-        _log_pred.warning("[CLF] Error clasificando ciclo %s ventana %s: %s",
-                          id_ciclo, ventana, exc)
+        except Exception as exc:
+            _log_pred.warning("[CLF] Error clasificando ciclo %s ventana %s: %s",
+                              id_ciclo, ventana, exc)
 
     id_prediccion = None
     if persistir:
@@ -814,7 +816,17 @@ def ejecutar_prediccion_ventana(
                  score_pearson, score_magnitud_pendiente, score_compuesto, cultivo_predicho,
                  fecha_congelamiento)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
-            ON CONFLICT (id_ciclo, ventana) DO NOTHING;
+            ON CONFLICT (id_ciclo, ventana) DO UPDATE SET
+                lswi_max_efectivo_usado = excluded.lswi_max_efectivo_usado,
+                gpp_acumulado = excluded.gpp_acumulado,
+                npp_acumulado = excluded.npp_acumulado,
+                rendimiento_estimado_qq_ha = excluded.rendimiento_estimado_qq_ha,
+                rendimiento_estimado_qq_parcela = excluded.rendimiento_estimado_qq_parcela,
+                score_pearson = COALESCE(excluded.score_pearson, score_pearson),
+                score_magnitud_pendiente = COALESCE(excluded.score_magnitud_pendiente, score_magnitud_pendiente),
+                score_compuesto = COALESCE(excluded.score_compuesto, score_compuesto),
+                cultivo_predicho = COALESCE(excluded.cultivo_predicho, cultivo_predicho),
+                fecha_congelamiento = CURRENT_TIMESTAMP;
         """
         with closing(get_connection_raw()) as conn:
             with conn:
@@ -827,24 +839,25 @@ def ejecutar_prediccion_ventana(
                 if cur.rowcount > 0:
                     id_prediccion = cur.lastrowid
 
-        try:
-            from pipeline.modulo_clasificacion import persistir_clasificacion_v2
-            with closing(get_connection_raw()) as conn_per:
-                persistir_clasificacion_v2(
-                    conn_per,
-                    {"estado": "evaluado" if score_comp_val is not None else "sin_datos",
-                     "score_compuesto": score_comp_val,
-                     "r_forma": score_pearson_val,
-                     "pendiente_obs": score_pend_val,
-                     "dia_post_sos": int((pd.Timestamp(fecha_ventana) - sos_ts).days),
-                     "patron_usado": None,
-                     "id_parcela": id_parcela},
-                    id_ciclo,
-                    ventana=ventana,
-                )
-        except Exception as exc:
-            _log_pred.warning("[CLF] Error persistiendo clasificación ciclo %s: %s",
-                              id_ciclo, exc)
+        if clasificar:
+            try:
+                from pipeline.modulo_clasificacion import persistir_clasificacion_v2
+                with closing(get_connection_raw()) as conn_per:
+                    persistir_clasificacion_v2(
+                        conn_per,
+                        {"estado": "evaluado" if score_comp_val is not None else "sin_datos",
+                         "score_compuesto": score_comp_val,
+                         "r_forma": score_pearson_val,
+                         "pendiente_obs": score_pend_val,
+                         "dia_post_sos": int((pd.Timestamp(fecha_ventana) - sos_ts).days),
+                         "patron_usado": None,
+                         "id_parcela": id_parcela},
+                        id_ciclo,
+                        ventana=ventana,
+                    )
+            except Exception as exc:
+                _log_pred.warning("[CLF] Error persistiendo clasificación ciclo %s: %s",
+                                  id_ciclo, exc)
 
         if id_prediccion is not None:
             ult_obs_evi  = serie_evi_obs.index[-1]  if not serie_evi_obs.empty  else None
