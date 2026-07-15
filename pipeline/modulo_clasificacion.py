@@ -570,21 +570,72 @@ def cargar_perfil_tipicidad(conn, dia_corte, version=None):
         "shrinkage": r["shrinkage"],
     }
 
-def evaluar_tipicidad(id_parcela, dia_corte, perfil, matriz_evi_100, matriz_lswi_100, df_meta_final):
-    idx = df_meta_final[df_meta_final['id_parcela'] == id_parcela].index
-    if len(idx) == 0:
-        raise ValueError(f"id_parcela {id_parcela} no encontrado")
-    idx = idx[0]
+def evaluar_tipicidad(id_parcela, serie_evi, serie_lswi, dia_corte, perfil):
+    """
+    Evalúa la tipicidad de UNA parcela respecto al perfil de referencia de maíz,
+    usando su distancia de Mahalanobis en el espacio de las 6 métricas fenológicas.
 
-    x = extraer_features_al_dia(matriz_evi_100, matriz_lswi_100, dia_corte=dia_corte)[[idx]]
-    x_scaled = (x - perfil["scaler_mean"]) / perfil["scaler_scale"]  # equivalente a scaler.transform sin reinstanciar
+    Diseñada para producción: recibe directamente las series de la parcela a evaluar,
+    sin depender de que esté indexada dentro de una matriz global precomputada.
 
+    Parameters
+    ----------
+    id_parcela : int
+        Identificador de la parcela, solo para trazabilidad en el resultado.
+    serie_evi : array-like, shape (>= dia_corte,)
+        Serie EVI diaria de la parcela, alineada a su propio SOS (índice 0 = día 0
+        post-SOS). Debe cubrir al menos hasta dia_corte.
+    serie_lswi : array-like, shape (>= dia_corte,)
+        Serie LSWI diaria de la parcela, misma alineación que serie_evi.
+    dia_corte : int
+        Día post-SOS (inclusive) hasta el cual se calculan las features. Debe coincidir
+        con el dia_corte del perfil cargado (perfil["dia_corte"]) -- normalmente es el
+        día efectivo determinado por determinar_dia_efectivo().
+    perfil : dict
+        Perfil de referencia cargado vía cargar_perfil_tipicidad() -- debe contener
+        scaler_mean, scaler_scale, centroide, matriz_precision, version, dia_corte.
+
+    Returns
+    -------
+    dict con:
+        id_parcela, dia_corte, version_perfil, distancia_mahalanobis, features_crudas,
+        estado ("ok" o "datos_insuficientes" si hay NaN en la ventana solicitada)
+
+    Raises
+    ------
+    ValueError
+        Si serie_evi o serie_lswi no cubren al menos dia_corte días.
+    """
+    serie_evi = np.asarray(serie_evi)
+    serie_lswi = np.asarray(serie_lswi)
+
+    if len(serie_evi) < dia_corte or len(serie_lswi) < dia_corte:
+        raise ValueError(
+            f"id_parcela {id_parcela}: series insuficientes para dia_corte={dia_corte} "
+            f"(len evi={len(serie_evi)}, len lswi={len(serie_lswi)})"
+        )
+
+    # extraer_features_al_dia espera una matriz 2D (n_parcelas, n_dias) -- envolvemos
+    # las series de una sola parcela como matriz de una fila
+    x = extraer_features_al_dia(
+        serie_evi.reshape(1, -1), serie_lswi.reshape(1, -1), dia_corte=dia_corte
+    )
+
+    if np.isnan(x).any():
+        return {
+            "id_parcela": id_parcela, "dia_corte": dia_corte,
+            "version_perfil": perfil["version"], "estado": "datos_insuficientes",
+            "distancia_mahalanobis": None, "features_crudas": None,
+        }
+
+    x_scaled = (x - perfil["scaler_mean"]) / perfil["scaler_scale"]
     dist = mahalanobis(x_scaled[0], perfil["centroide"], perfil["matriz_precision"])
 
     return {
         "id_parcela": id_parcela,
         "dia_corte": dia_corte,
         "version_perfil": perfil["version"],
+        "estado": "ok",
         "distancia_mahalanobis": dist,
         "features_crudas": x[0].tolist(),
     }
@@ -610,16 +661,98 @@ def determinar_dia_efectivo(id_parcela, sos, dia_objetivo, df_evi, dia_minimo_ac
         return None  # muy pocos datos, no vale la pena evaluar todavía
     return dia_efectivo
 
-def evaluar_tipicidad_robusta(id_parcela, sos, dia_objetivo, df_evi, df_lswi,
-                                matriz_evi_100, matriz_lswi_100, df_meta_final,
-                                conn, version_perfil=1, dia_minimo_aceptable=20):
+def construir_serie_desde_sos(id_parcela, sos, dia_corte, df_indice):
+    """
+    Extrae la serie diaria de un índice (EVI o LSWI) para una parcela, alineada a su SOS,
+    desde una tabla indexada por fecha calendario (columna 'id_<parcela>').
+
+    Returns un array de longitud dia_corte, o levanta KeyError si faltan columnas/fechas.
+    """
+    col = f"id_{id_parcela}"
+    rango = pd.date_range(start=sos, periods=dia_corte, freq="D")
+    return df_indice.loc[rango, col].values
+
+
+def evaluar_tipicidad_robusta(id_parcela, sos, dia_objetivo, df_evi, df_lswi, conn,
+                                version_perfil=1, dia_minimo_aceptable=20):
     dia_efectivo = determinar_dia_efectivo(id_parcela, sos, dia_objetivo, df_evi, dia_minimo_aceptable)
     if dia_efectivo is None:
-        return {"id_parcela": id_parcela, "estado": "datos_insuficientes", "dia_objetivo": dia_objetivo}
+        return {"id_parcela": id_parcela, "dia_objetivo": dia_objetivo,
+                "estado": "datos_insuficientes", "distancia_mahalanobis": None}
 
-    perfil = cargar_perfil_tipicidad(conn, dia_efectivo, version=version_perfil)
-    resultado = evaluar_tipicidad(id_parcela, dia_efectivo, perfil, matriz_evi_100, matriz_lswi_100, df_meta_final)
+    try:
+        perfil = cargar_perfil_tipicidad(conn, dia_efectivo, version=version_perfil)
+    except ValueError:
+        return {"id_parcela": id_parcela, "dia_objetivo": dia_objetivo, "dia_efectivo": dia_efectivo,
+                "estado": f"sin_perfil_persistido_para_dia_{dia_efectivo}", "distancia_mahalanobis": None}
+
+    serie_evi = construir_serie_desde_sos(id_parcela, sos, dia_efectivo, df_evi)
+    serie_lswi = construir_serie_desde_sos(id_parcela, sos, dia_efectivo, df_lswi)
+
+    resultado = evaluar_tipicidad(id_parcela, serie_evi, serie_lswi, dia_efectivo, perfil)
     resultado["dia_objetivo"] = dia_objetivo
     resultado["dia_efectivo"] = dia_efectivo
     resultado["gap_dias"] = dia_objetivo - dia_efectivo
     return resultado
+
+
+def persistir_clasificacion_mahalanobis(conn, resultado, id_ciclo, ventana=None):
+    if resultado.get("estado") != "ok":
+        _log_clf.debug("[MAHAL] Ciclo %s: estado '%s', no se persiste", id_ciclo, resultado.get("estado"))
+        return
+
+    if resultado.get("distancia_mahalanobis") is None:
+        _log_clf.debug("[MAHAL] Ciclo %s: distancia_mahalanobis nula, no se persiste", id_ciclo)
+        return
+
+    dia = resultado.get("dia_objetivo")
+    if ventana is None:
+        ventana = "T1" if dia <= 30 else ("T2" if dia <= 60 else "T3")
+
+    with conn:
+        cur = conn.execute(
+            """UPDATE predicciones_ventana
+               SET distancia_mahalanobis_tipicidad = ?,
+                   version_perfil_tipicidad = ?,
+                   dia_efectivo_tipicidad = ?,
+                   estado_tipicidad = ?
+               WHERE id_ciclo = ? AND ventana = ?""",
+            (
+                resultado["distancia_mahalanobis"],
+                resultado.get("version_perfil"),
+                resultado.get("dia_efectivo"),
+                resultado.get("estado"),
+                id_ciclo,
+                ventana,
+            ),
+        )
+
+        if cur.rowcount == 0:
+            conn.execute(
+                """INSERT INTO predicciones_ventana
+                   (id_ciclo, id_parcela, ventana, fecha_ventana,
+                    distancia_mahalanobis_tipicidad,
+                    version_perfil_tipicidad,
+                    dia_efectivo_tipicidad,
+                    estado_tipicidad,
+                    fecha_congelamiento)
+                   VALUES (?, ?, ?, DATE('now'),
+                           ?, ?, ?, ?, CURRENT_TIMESTAMP)""",
+                (
+                    id_ciclo,
+                    resultado.get("id_parcela"),
+                    ventana,
+                    resultado["distancia_mahalanobis"],
+                    resultado.get("version_perfil"),
+                    resultado.get("dia_efectivo"),
+                    resultado.get("estado"),
+                ),
+            )
+
+    _log_clf.info(
+        "[MAHAL] Ciclo %s → distancia=%.4f (perfil v%s, día_efectivo=%d, ventana=%s)",
+        id_ciclo, resultado["distancia_mahalanobis"],
+        resultado.get("version_perfil") or 0,
+        resultado.get("dia_efectivo") or 0,
+        ventana,
+    )
