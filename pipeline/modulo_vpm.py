@@ -28,8 +28,9 @@ def preprocesar_indices_vpm(
     lambda_param : float, opcional
         Parámetro de suavizado de Whittaker (por defecto 4000.0).
     lswi_max : pd.Series | dict[str, float] | None, opcional
-        LSWI máximo histórico por parcela. Si es None, se calcula como el máximo
-        de la serie temporal diaria suavizada para cada parcela.
+        LSWI máximo histórico por parcela (percentil 90 sobre serie suavizada).
+        Si es None, se usa el máximo de la serie diaria suavizada actual como
+        fallback.
 
     Retorna
     -------

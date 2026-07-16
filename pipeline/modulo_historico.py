@@ -98,13 +98,14 @@ def seed_lswi_max(
     lambda_param: float = 4000.0,
 ) -> int:
     """
-    Calcula el LSWI máximo por parcela a partir de **todos** los segmentos
-    (ciclos) detectados.  Asigna cada segmento a su temporada
+    Calcula el percentil 90 de LSWI por parcela a partir de **todos** los
+    valores diarios suavizados (Whittaker) de los segmentos (ciclos)
+    detectados.  Asigna cada segmento a su temporada
     (``primera``/``postrera``) según el mes del punto medio del segmento
-    y persiste el máximo histórico por parcela-temporada en
+    y persiste el percentil 90 histórico por parcela-temporada en
     ``lswi_maximo``.
     Cada segmento se suaviza de forma independiente con Whittaker antes
-    de extraer su LSWI máximo.
+    de extraer sus valores diarios.
 
     Parámetros
     ----------
@@ -131,7 +132,7 @@ def seed_lswi_max(
         if not segmentos:
             continue
 
-        maximos_por_temporada: dict[str, list[float]] = {}
+        valores_por_temporada: dict[str, list[float]] = {}
         for inicio, fin in segmentos:
             raw = df_lswi_crudo.loc[inicio:fin, col].dropna()
             if raw.empty:
@@ -148,16 +149,18 @@ def seed_lswi_max(
                 {"LSWI": diario},
                 lambda_param=lambda_param,
             )["LSWI"]
-            lswi_max_seg = float(suave[col].max())
+            valores_seg = suave[col].dropna().tolist()
 
             punto_medio = inicio + (fin - inicio) / 2
             mes = punto_medio.month
             temporada = "primera" if 4 <= mes <= 7 else "postrera"
-            maximos_por_temporada.setdefault(temporada, []).append(lswi_max_seg)
+            valores_por_temporada.setdefault(temporada, []).extend(valores_seg)
 
-        for temporada, valores in maximos_por_temporada.items():
-            max_global = max(valores)
-            filas.append((id_parcela, max_global, temporada))
+        for temporada, valores in valores_por_temporada.items():
+            if not valores:
+                continue
+            p90 = float(np.percentile(valores, 90))
+            filas.append((id_parcela, p90, temporada))
 
     if not filas:
         log.warning("[WAVE] No se pudieron calcular valores de LSWI máximo.")

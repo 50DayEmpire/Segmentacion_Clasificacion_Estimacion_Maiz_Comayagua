@@ -686,17 +686,7 @@ def detectar_y_crear_ciclos_pendientes(
                     )
                     continue
 
-                from pipeline.ingesta import cargar_indices_desde_bd
-                try:
-                    dfs_completo = cargar_indices_desde_bd(ids_parcelas=[id_parcela])
-                    df_lswi = dfs_completo["LSWI"]
-                    lswi_max_val = (
-                        float(df_lswi[col].max())
-                        if col in df_lswi.columns and not df_lswi[col].isna().all()
-                        else None
-                    )
-                except ValueError:
-                    lswi_max_val = None
+                lswi_max_val = None  # se obtiene de lswi_maximo en tiempo de predicción
 
                 sql_insert = """
                     INSERT INTO produccion_acumulada_ciclo
