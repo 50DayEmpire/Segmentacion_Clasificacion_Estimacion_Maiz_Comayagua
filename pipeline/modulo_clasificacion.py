@@ -548,6 +548,9 @@ def persistir_perfil_tipicidad(conn, perfil, version):
 
 def cargar_perfil_tipicidad(conn, dia_corte, version=None):
     """Si version=None, carga la más reciente disponible para ese dia_corte."""
+    dia_corte = int(dia_corte)
+    if version is not None:
+        version = int(version)
     query = """
         SELECT * FROM perfil_tipicidad_maiz
         WHERE dia_corte = ?
@@ -696,14 +699,32 @@ def evaluar_tipicidad_robusta(id_parcela, sos, dia_objetivo, df_evi, df_lswi, co
     return resultado
 
 
-def persistir_clasificacion_mahalanobis(conn, resultado, id_ciclo, ventana=None):
+def _distancia_a_label(distancia):
+    """Convierte distancia de Mahalanobis a etiqueta de clasificación."""
+    if distancia is None or (isinstance(distancia, float) and np.isnan(distancia)):
+        return "Incierto"
+    from config import MAHALANOBIS_UMBRAL_MAIZ, MAHALANOBIS_UMBRAL_BAJA
+    if distancia <= MAHALANOBIS_UMBRAL_MAIZ:
+        return "Maíz"
+    if distancia <= MAHALANOBIS_UMBRAL_BAJA:
+        return "Maíz - baja probabilidad"
+    return "Otro"
+
+def persistir_clasificacion_mahalanobis(conn, resultado, id_ciclo, ventana=None, label=None):
     if resultado.get("estado") != "ok":
         _log_clf.debug("[MAHAL] Ciclo %s: estado '%s', no se persiste", id_ciclo, resultado.get("estado"))
         return
 
-    if resultado.get("distancia_mahalanobis") is None:
+    distancia = resultado.get("distancia_mahalanobis")
+    if distancia is None:
         _log_clf.debug("[MAHAL] Ciclo %s: distancia_mahalanobis nula, no se persiste", id_ciclo)
         return
+
+    if label is None:
+        label = _distancia_a_label(distancia)
+
+    # Score compuesto derivado para compatibilidad con vistas existentes
+    score_compuesto = max(0.0, min(100.0, 100.0 - distancia * 12.0))
 
     dia = resultado.get("dia_objetivo")
     if ventana is None:
@@ -715,13 +736,17 @@ def persistir_clasificacion_mahalanobis(conn, resultado, id_ciclo, ventana=None)
                SET distancia_mahalanobis_tipicidad = ?,
                    version_perfil_tipicidad = ?,
                    dia_efectivo_tipicidad = ?,
-                   estado_tipicidad = ?
+                   estado_tipicidad = ?,
+                   score_compuesto = ?,
+                   cultivo_predicho = ?
                WHERE id_ciclo = ? AND ventana = ?""",
             (
-                resultado["distancia_mahalanobis"],
+                distancia,
                 resultado.get("version_perfil"),
                 resultado.get("dia_efectivo"),
                 resultado.get("estado"),
+                score_compuesto,
+                label,
                 id_ciclo,
                 ventana,
             ),
@@ -735,24 +760,110 @@ def persistir_clasificacion_mahalanobis(conn, resultado, id_ciclo, ventana=None)
                     version_perfil_tipicidad,
                     dia_efectivo_tipicidad,
                     estado_tipicidad,
+                    score_compuesto, cultivo_predicho,
                     fecha_congelamiento)
                    VALUES (?, ?, ?, DATE('now'),
-                           ?, ?, ?, ?, CURRENT_TIMESTAMP)""",
+                           ?, ?, ?, ?,
+                           ?, ?, CURRENT_TIMESTAMP)""",
                 (
                     id_ciclo,
                     resultado.get("id_parcela"),
                     ventana,
-                    resultado["distancia_mahalanobis"],
+                    distancia,
                     resultado.get("version_perfil"),
                     resultado.get("dia_efectivo"),
                     resultado.get("estado"),
+                    score_compuesto,
+                    label,
                 ),
             )
 
+        conn.execute(
+            "UPDATE produccion_acumulada_ciclo SET clasificacion_final = ? WHERE id_ciclo = ?",
+            (label, id_ciclo),
+        )
+
     _log_clf.info(
-        "[MAHAL] Ciclo %s → distancia=%.4f (perfil v%s, día_efectivo=%d, ventana=%s)",
-        id_ciclo, resultado["distancia_mahalanobis"],
+        "[MAHAL] Ciclo %s → %s (dist=%.4f, score=%.1f%%, perfil v%s, ventana=%s)",
+        id_ciclo, label, distancia, score_compuesto,
         resultado.get("version_perfil") or 0,
-        resultado.get("dia_efectivo") or 0,
         ventana,
     )
+
+
+def reclasificar_pendientes(conn=None):
+    """Re-evalúa la clasificación Mahalanobis para predicciones T1/T2
+    que quedaron con cultivo_predicho=NULL (ej. por el bug de np.int64).
+
+    Retorna (intentos, ok, saltados).
+    """
+    from pipeline.ingesta import cargar_indices_desde_bd
+    from pipeline.modulo_vpm import preprocesar_indices_vpm
+
+    propio_conn = conn is None
+    if propio_conn:
+        conn = get_connection_raw()
+
+    pendientes = conn.execute("""
+        SELECT pv.id_ciclo, pv.id_parcela, pv.ventana, pv.fecha_ventana,
+               pac.sos
+        FROM predicciones_ventana pv
+        JOIN produccion_acumulada_ciclo pac ON pv.id_ciclo = pac.id_ciclo
+        WHERE pv.ventana IN ('T1','T2')
+          AND pv.cultivo_predicho IS NULL
+          AND pac.sos IS NOT NULL
+        ORDER BY pv.id_ciclo
+    """).fetchall()
+
+    _log_clf.info("[RECLF] %d predicciones pendientes de reclasificar", len(pendientes))
+    intentos = 0
+    ok = 0
+    saltados = 0
+
+    for id_ciclo, id_parcela, ventana, fecha_ventana, sos_str in pendientes:
+        intentos += 1
+        sos_ts = pd.Timestamp(sos_str)
+        fecha_ven_ts = pd.Timestamp(fecha_ventana)
+        dia_obj = int((fecha_ven_ts - sos_ts).days)
+
+        try:
+            dfs_crudos = cargar_indices_desde_bd(
+                fecha_inicio=str(sos_ts.date()),
+                fecha_fin=str(fecha_ven_ts.date()),
+                ids_parcelas=[id_parcela],
+            )
+        except Exception:
+            _log_clf.warning("[RECLF] ciclo %s: sin datos EVI/LSWI", id_ciclo)
+            saltados += 1
+            continue
+
+        if (dfs_crudos["EVI"].empty or dfs_crudos["LSWI"].empty
+            or f"id_{id_parcela}" not in dfs_crudos["EVI"].columns
+            or f"id_{id_parcela}" not in dfs_crudos["LSWI"].columns):
+            saltados += 1
+            continue
+
+        dfs_vpm = preprocesar_indices_vpm(dfs_crudos, lambda_param=4000.0)
+        col = f"id_{id_parcela}"
+        if col not in dfs_vpm["EVI"].columns or col not in dfs_vpm["LSWI"].columns:
+            saltados += 1
+            continue
+
+        resultado = evaluar_tipicidad_robusta(
+            id_parcela, sos_ts, dia_obj,
+            df_evi=dfs_vpm["EVI"], df_lswi=dfs_vpm["LSWI"],
+            conn=conn, version_perfil=1, dia_minimo_aceptable=20,
+        )
+
+        if resultado.get("estado") == "ok" and resultado.get("distancia_mahalanobis") is not None:
+            persistir_clasificacion_mahalanobis(conn, resultado, id_ciclo, ventana=ventana)
+            ok += 1
+        else:
+            _log_clf.info("[RECLF] ciclo %s ventana %s: %s", id_ciclo, ventana, resultado.get("estado"))
+            saltados += 1
+
+    if propio_conn:
+        conn.close()
+
+    _log_clf.info("[RECLF] Hecho: %d intentos, %d reclasificados, %d saltados", intentos, ok, saltados)
+    return intentos, ok, saltados

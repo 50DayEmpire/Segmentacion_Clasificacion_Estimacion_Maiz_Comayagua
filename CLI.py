@@ -24,7 +24,7 @@ ROOT = Path(__file__).resolve().parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from config import GPKG_PATH, GPKG_PRUEBAS_PATH, CICLOS
+from config import GPKG_PATH, CICLOS
 
 # ══════════════════════════════════════════════════════════════════════════════
 # Helpers de UI
@@ -1627,6 +1627,7 @@ def _menu_clasificacion() -> None:
         _seccion("9 · Clasificación de Cultivos")
         key = _menu({
             "pendientes": "Clasificar ciclos pendientes (sin clasificacion_final)",
+            "reclasificar": "Re-clasificar predicciones T1/T2 con score NULL (bug np.int64)",
             "parcela":    "Clasificar parcela específica",
             "resumen":    "Ver resumen de clasificación",
         })
@@ -1634,6 +1635,8 @@ def _menu_clasificacion() -> None:
             return
         elif key == "pendientes":
             _accion_clasificar_pendientes()
+        elif key == "reclasificar":
+            _accion_reclasificar_mahalanobis()
         elif key == "parcela":
             _accion_clasificar_parcela()
         elif key == "resumen":
@@ -1664,6 +1667,21 @@ def _accion_clasificar_pendientes() -> None:
         from pipeline.modulo_clasificacion import seed_clasificacion
         res = seed_clasificacion(conn)
     _mostrar_resumen_clasificacion(res)
+    _pausar()
+
+
+def _accion_reclasificar_mahalanobis() -> None:
+    _seccion("Re-clasificar predicciones con score NULL")
+    _warn("Re-evalúa la clasificación Mahalanobis para todas las predicciones T1/T2\n"
+          "       que quedaron con cultivo_predicho=NULL (ej. por el bug de np.int64).\n"
+          "       No modifica los rendimientos estimados.")
+    print()
+    confirmar = input("  ¿Continuar? (s/n): ").strip().lower()
+    if confirmar != "s":
+        return
+    from pipeline.modulo_clasificacion import reclasificar_pendientes
+    intentos, ok, saltados = reclasificar_pendientes()
+    _ok(f"Reclasificados: {ok} / {intentos}  (saltados: {saltados})")
     _pausar()
 
 
@@ -1727,23 +1745,49 @@ _MENU_PRINCIPAL = {
     "worker":      "Worker Diario (automatización)",
     "historico":   "Procesamiento histórico de series multianuales",
     "clasificacion": "Clasificación de cultivos",
-    "modo":        "Cambiar modo BD (REAL / PRUEBAS)",
+    "modo":        "Cambiar base de datos activa (data/*.gpkg)",
 }
 
 def _accion_cambiar_modo() -> None:
-    from utils.conexionDB import set_db_mode, get_db_path
-    actual = "PRUEBAS" if str(get_db_path()) == str(GPKG_PRUEBAS_PATH) else "REAL"
-    _seccion(f"Cambiar modo BD (actual: {actual})")
-    print("  [1] Modo REAL")
-    print("  [2] Modo PRUEBAS")
-    print("  [0] Cancelar")
+    from utils.conexionDB import set_db_path, get_db_path, listar_gpkgs_validados
+    _seccion("Seleccionar base de datos")
+
+    gpkgs = listar_gpkgs_validados()
+    if not gpkgs:
+        print("  No hay GPKGs válidos en data/.\n"
+              "  Ejecuta primero el seeding para inicializar uno.")
+        _pausar()
+        return
+
+    actual = get_db_path().resolve()
+    print("  GPKGs disponibles en data/:\n")
+    for i, p in enumerate(gpkgs, 1):
+        marca = "  [ACTIVO]" if p.resolve() == actual else "          "
+        print(f"  {marca} [{i}] {p.name}")
+        print(f"          {p}")
+    print("\n  [0] Cancelar")
+
     raw = input("\n  Opción: ").strip()
-    if raw == "1":
-        set_db_mode("real")
-        _ok("Modo cambiado a REAL")
-    elif raw == "2":
-        set_db_mode("pruebas")
-        _ok("Modo cambiado a PRUEBAS")
+    if raw == "0" or raw == "":
+        return
+
+    try:
+        idx = int(raw) - 1
+        if idx < 0 or idx >= len(gpkgs):
+            raise ValueError
+    except (ValueError, IndexError):
+        _error("Opción inválida")
+        _pausar()
+        return
+
+    elegido = gpkgs[idx]
+    if elegido.resolve() == actual:
+        print("  Ya está activo.")
+        _pausar()
+        return
+
+    set_db_path(elegido)
+    _ok(f"BD cambiada a: {elegido.name}")
     _pausar()
 
 
@@ -1752,10 +1796,9 @@ def main() -> None:
     while True:
         _clear()
         _titulo("🌽  Pipeline Maíz Comayagua — CLI")
-        modo = "PRUEBAS" if str(get_db_path()) == str(GPKG_PRUEBAS_PATH) else "REAL"
         print(textwrap.dedent(f"""
           GeoPackage activo : {get_db_path()}
-          Modo              : [{modo}]
+          BD                : {get_db_path().name}
           Python            : {sys.executable}
         """))
         key = _menu(_MENU_PRINCIPAL)

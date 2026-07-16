@@ -718,8 +718,19 @@ def ejecutar_prediccion_ventana(
 
     # ── 2. Verificar si ya existe ─────────────────────────────────────────
     if existe_prediccion_ventana(id_ciclo, ventana):
-        print(f"  [SKIP] Predicci\u00f3n ya existe para ciclo {id_ciclo}, ventana {ventana}.")
-        return None
+        if ventana in ("T1", "T2"):
+            with closing(get_connection_raw()) as _conn:
+                tiene_clasif = _conn.execute(
+                    "SELECT 1 FROM predicciones_ventana WHERE id_ciclo=? AND ventana=? AND cultivo_predicho IS NOT NULL LIMIT 1",
+                    (id_ciclo, ventana),
+                ).fetchone() is not None
+            if tiene_clasif:
+                print(f"  [SKIP] Predicción ya existe para ciclo {id_ciclo}, ventana {ventana} (con clasificación).")
+                return None
+            print(f"  [INFO] Predicción existe pero sin clasificación — re-procesando para ciclo {id_ciclo}, ventana {ventana}.")
+        else:
+            print(f"  [SKIP] Predicción ya existe para ciclo {id_ciclo}, ventana {ventana}.")
+            return None
 
     # ── 3. Cargar índices crudos desde BD ─────────────────────────────────
     print(f"  [1/5] Cargando EVI/LSWI crudos desde SOS...")

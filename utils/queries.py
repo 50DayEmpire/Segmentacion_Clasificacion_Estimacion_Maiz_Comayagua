@@ -273,12 +273,20 @@ def cargar_extrapolacion_prediccion(id_prediccion: int) -> dict | None:
     return result
 
 
-@st.cache_data(show_spinner="Cargando ciclos pendientes de clasificación…")
-def cargar_ciclos_no_finalizados(temporada: str) -> pd.DataFrame:
+@st.cache_data(show_spinner="Cargando ciclos…")
+def cargar_ciclos_no_finalizados(temporada: str, anio: int | None = None) -> pd.DataFrame:
     """
-    Consulta ciclos con estado ``candidato`` o ``activo`` para la temporada
-    indicada, trayendo el score compuesto y cultivo predicho de la ventana
-    de predicción más avanzada disponible.
+    Consulta ciclos para la temporada indicada, trayendo el score compuesto
+    y cultivo predicho de la ventana de predicción más avanzada disponible.
+
+    Parameters
+    ----------
+    temporada : str
+        ``"primera"`` o ``"postrera"``.
+    anio : int | None
+        Si se especifica, retorna **todos** los ciclos de ese año
+        (sin filtrar por estado). Si es ``None``, retorta solo los
+        ciclos ``candidato`` o ``activo`` (comportamiento histórico).
 
     Retorna
     -------
@@ -300,6 +308,20 @@ def cargar_ciclos_no_finalizados(temporada: str) -> pd.DataFrame:
         ]
 
     clasif_col = "pac.clasificacion_final" if col_exists else "NULL AS clasificacion_final"
+
+    params: list = []
+    where_clauses: list[str] = []
+
+    if anio:
+        where_clauses.append("CAST(strftime('%Y', pac.sos) AS INTEGER) = ?")
+        params.append(anio)
+    else:
+        where_clauses.append("pac.estado_ciclo IN ('candidato', 'activo')")
+
+    where_clauses.append("pac.temporada = ?")
+    params.append(temporada)
+
+    where_sql = " AND ".join(where_clauses)
 
     sql = f"""
         WITH ultima_ventana AS (
@@ -328,16 +350,127 @@ def cargar_ciclos_no_finalizados(temporada: str) -> pd.DataFrame:
         FROM produccion_acumulada_ciclo pac
         LEFT JOIN ultima_ventana uv
             ON uv.id_ciclo = pac.id_ciclo AND uv.rn = 1
-        WHERE pac.estado_ciclo IN ('candidato', 'activo')
-          AND pac.temporada = ?
+        WHERE {where_sql}
         ORDER BY pac.sos DESC
     """
     with closing(get_connection_raw()) as conn:
-        df = pd.read_sql(sql, conn, params=(temporada,),
+        df = pd.read_sql(sql, conn, params=params,
                          parse_dates=["sos", "t1", "t2", "t3", "eos"])
     if col_exists:
         df["clasificacion_final"] = df["clasificacion_final"].fillna("")
     return df
+
+
+@st.cache_data(show_spinner="Calculando resumen…")
+def cargar_resumen_agregado(
+    temporada: str,
+    ventana: str | None = None,
+) -> dict:
+    """
+    Métricas agregadas para la vista Resumen.
+    Solo considera el ciclo más reciente por parcela-temporada.
+
+    Para ciclos finalizados usa el rendimiento y producción real.
+    Para activos/candidatos usa la estimación de la ventana más avanzada
+    disponible en ``predicciones_ventana``.
+
+    Parámetros
+    ----------
+    temporada : str
+        ``'primera'`` o ``'postrera'``.
+    ventana : str | None
+        Si se especifica, solo considera predicciones hasta esta ventana
+        (T1/T2/T3/EOS). ``None`` = usa la más avanzada disponible.
+
+    Retorna
+    -------
+    dict con:
+        total_parcelas, area_sembrada_ha, total_produccion_qq,
+        rendimiento_promedio_qq_ha, rendimiento_ref_qq_ha,
+        clasificaciones (dict), distribucion_rendimiento (list),
+        ciclos_finalizados, ciclos_activos
+    """
+    from contextlib import closing
+    from utils.conexionDB import get_connection_raw
+    from config import RENDIMIENTO_REF
+
+    orden_ventanas = {"T1": 1, "T2": 2, "T3": 3, "EOS": 4}
+    ventana_rank = f"""
+        CASE ventana
+            WHEN 'EOS' THEN 4 WHEN 'T3' THEN 3
+            WHEN 'T2' THEN 2 WHEN 'T1' THEN 1
+        END
+    """
+
+    if ventana:
+        filtro_ventana = f"AND {ventana_rank} <= {orden_ventanas.get(ventana, 4)}"
+    else:
+        filtro_ventana = ""
+
+    sql = f"""
+        WITH ultimo_ciclo AS (
+            SELECT *, ROW_NUMBER() OVER (
+                PARTITION BY id_parcela, temporada
+                ORDER BY sos DESC
+            ) AS rn
+            FROM produccion_acumulada_ciclo
+            WHERE temporada = ?
+        ),
+        ultima_pred AS (
+            SELECT id_ciclo, rendimiento_estimado_qq_ha,
+                   rendimiento_estimado_qq_parcela,
+                   ROW_NUMBER() OVER (
+                       PARTITION BY id_ciclo
+                       ORDER BY {ventana_rank} DESC
+                   ) AS rn
+            FROM predicciones_ventana
+            WHERE 1=1 {filtro_ventana}
+        )
+        SELECT uc.id_ciclo, uc.id_parcela, uc.estado_ciclo,
+               uc.clasificacion_final,
+               COALESCE(uc.rendimiento, up.rendimiento_estimado_qq_ha) AS rendimiento_qq_ha,
+               COALESCE(uc.produccion_total, up.rendimiento_estimado_qq_parcela) AS produccion_qq,
+               pv.area_ha
+        FROM ultimo_ciclo uc
+        LEFT JOIN ultima_pred up ON up.id_ciclo = uc.id_ciclo AND up.rn = 1
+        LEFT JOIN parcelas_vigentes pv ON pv.id_parcela = uc.id_parcela
+        WHERE uc.rn = 1
+    """
+
+    with closing(get_connection_raw()) as conn:
+        df = pd.read_sql(sql, conn, params=(temporada,))
+
+    if df.empty:
+        return {
+            "total_parcelas": 0, "area_sembrada_ha": 0.0,
+            "total_produccion_qq": 0.0, "rendimiento_promedio_qq_ha": 0.0,
+            "rendimiento_ref_qq_ha": RENDIMIENTO_REF.get(temporada, 0),
+            "clasificaciones": {}, "distribucion_rendimiento": [],
+            "ciclos_finalizados": 0, "ciclos_activos": 0,
+        }
+
+    area_real = df.drop_duplicates(subset="id_parcela")["area_ha"].sum()
+    vals = df["rendimiento_qq_ha"].dropna()
+    prod = df["produccion_qq"].dropna()
+
+    clasif = (
+        df["clasificacion_final"]
+        .fillna("Sin clasificar")
+        .value_counts()
+        .to_dict()
+    )
+
+    return {
+        "total_parcelas": df["id_parcela"].nunique(),
+        "area_sembrada_ha": round(area_real, 2),
+        "total_produccion_qq": round(prod.sum(), 0),
+        "rendimiento_promedio_qq_ha": round(vals.mean(), 1) if not vals.empty else 0.0,
+        "rendimiento_ref_qq_ha": RENDIMIENTO_REF.get(temporada, 0),
+        "clasificaciones": clasif,
+        "distribucion_rendimiento": vals.tolist(),
+        "ciclos_finalizados": int((df["estado_ciclo"] == "finalizado").sum()),
+        "ciclos_activos": int(df["estado_ciclo"].isin(["activo", "candidato"]).sum()),
+    }
 
 
 @st.cache_data(show_spinner="Cargando área de estudio…")

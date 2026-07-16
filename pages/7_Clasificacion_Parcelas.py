@@ -10,6 +10,7 @@ from utils.queries import (
     cargar_predicciones_ciclo,
     cargar_indices_suavizados,
 )
+from config import ANIOS_HISTORICO
 from utils.conexionDB import get_connection_raw
 from pipeline.modulo_clasificacion import _score_a_label
 
@@ -27,6 +28,13 @@ cargar_indices_suavizados.clear()
 
 with st.sidebar:
     filtros = render_filtros_parcelas()
+    st.divider()
+    anio_clasif = st.select_slider(
+        "Año",
+        options=["Todos"] + ANIOS_HISTORICO,
+        value="Todos",
+        key="anio_clasificacion",
+    )
     st.divider()
     orden = st.selectbox(
         "Ordenar por",
@@ -51,10 +59,14 @@ st.divider()
 
 # ── Datos ────────────────────────────────────────────────────────────────────
 ciclo_sel = filtros.get("ciclo", "primera")
-df = cargar_ciclos_no_finalizados(ciclo_sel)
+anio_sel = anio_clasif if isinstance(anio_clasif, int) else None
+df = cargar_ciclos_no_finalizados(ciclo_sel, anio=anio_sel)
 
 if df.empty:
-    st.info(f"No hay ciclos no finalizados para la temporada **{ciclo_sel}**.", icon="✅")
+    if anio_sel:
+        st.info(f"No hay ciclos para **{anio_sel} - {ciclo_sel}**.", icon="✅")
+    else:
+        st.info(f"No hay ciclos no finalizados para la temporada **{ciclo_sel}**.", icon="✅")
     st.stop()
 
 # ── Ordenar ──────────────────────────────────────────────────────────────────
@@ -80,13 +92,22 @@ def _color_badge(score):
 # ── Resumen ─────────────────────────────────────────────────────────────────
 alta = df[df["score_compuesto"].fillna(-1) >= 70]
 cols_sup = st.columns(4)
-cols_sup[0].metric("Ciclos sin finalizar", len(df))
-cols_sup[1].metric("Alta prob. maíz (≥70)", len(alta))
-cols_sup[2].metric("Candidatos", len(df[df["estado_ciclo"] == "candidato"]))
-cols_sup[3].metric("Activos", len(df[df["estado_ciclo"] == "activo"]))
+if anio_sel:
+    cols_sup[0].metric("Ciclos totales", len(df))
+    cols_sup[1].metric("Alta prob. maíz (≥70)", len(alta))
+    cols_sup[2].metric("Finalizados", len(df[df["estado_ciclo"] == "finalizado"]))
+    cols_sup[3].metric("Activos/Candidatos", len(df[df["estado_ciclo"].isin(["activo", "candidato"])]))
+else:
+    cols_sup[0].metric("Ciclos sin finalizar", len(df))
+    cols_sup[1].metric("Alta prob. maíz (≥70)", len(alta))
+    cols_sup[2].metric("Candidatos", len(df[df["estado_ciclo"] == "candidato"]))
+    cols_sup[3].metric("Activos", len(df[df["estado_ciclo"] == "activo"]))
 
 st.divider()
-st.markdown("### Parcelas pendientes de clasificación")
+if anio_sel:
+    st.markdown(f"### Ciclos — {anio_sel} ({ciclo_sel})")
+else:
+    st.markdown("### Parcelas pendientes de clasificación")
 
 # ── Session state for expand ────────────────────────────────────────────────
 card_key = st.session_state.get("clasificacion_card_key")

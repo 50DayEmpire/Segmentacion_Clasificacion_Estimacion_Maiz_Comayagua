@@ -242,6 +242,38 @@ def _crear_tablas_sql(conn: sqlite3.Connection) -> None:
         );
     """)
 
+    _migrar_columnas_mahalanobis(conn)
+
+def _migrar_columnas_mahalanobis(conn):
+    """Agrega columnas del clasificador Mahalanobis si no existen."""
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS perfil_tipicidad_maiz (
+            id_perfil           INTEGER PRIMARY KEY AUTOINCREMENT,
+            version              INTEGER NOT NULL,
+            dia_corte            INTEGER NOT NULL,
+            ids_parcelas_usadas  TEXT NOT NULL,
+            n_muestras           INTEGER NOT NULL,
+            nombres_features      TEXT NOT NULL,
+            scaler_mean           TEXT NOT NULL,
+            scaler_scale           TEXT NOT NULL,
+            centroide             TEXT NOT NULL,
+            matriz_precision      TEXT NOT NULL,
+            shrinkage             REAL NOT NULL,
+            fecha_calculo          TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE (version, dia_corte)
+        );
+    """)
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(predicciones_ventana)").fetchall()}
+    migraciones = [
+        ("distancia_mahalanobis_tipicidad", "REAL"),
+        ("version_perfil_tipicidad", "INTEGER"),
+        ("dia_efectivo_tipicidad", "INTEGER"),
+        ("estado_tipicidad", "TEXT"),
+    ]
+    for nombre, tipo in migraciones:
+        if nombre not in cols:
+            conn.execute(f"ALTER TABLE predicciones_ventana ADD COLUMN {nombre} {tipo}")
+
 def seeding(rutaGJSON: str) -> None:
     actualizar_gpkg(rutaGJSON, "replace")
     with closing(get_connection_raw()) as conn:

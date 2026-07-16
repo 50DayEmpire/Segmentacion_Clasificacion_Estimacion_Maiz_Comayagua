@@ -142,8 +142,11 @@ window.ltoDeleteSelected = function() {
 
 window.ltoDownload = function() {
   var features = [];
+  var seen = new Set();
   collectAllPolygons(function(poly) {
     if (!poly._ltoSetup) return;
+    if (seen.has(poly._leaflet_id)) return;
+    seen.add(poly._leaflet_id);
     try {
       if (!poly.getLatLngs || !poly.getLatLngs().length) return;
       var gj = poly.toGeoJSON();
@@ -162,7 +165,10 @@ window.ltoDownload = function() {
 window.ltoDiagnose = function() {
   var total = 0;
   var setup = 0;
+  var seen = new Set();
   collectAllPolygons(function(poly) {
+    if (seen.has(poly._leaflet_id)) return;
+    seen.add(poly._leaflet_id);
     total++;
     if (poly._ltoSetup) setup++;
   });
@@ -173,8 +179,11 @@ window.ltoDiagnose = function() {
 
 window.ltoSaveToGpkg = function() {
   var features = [];
+  var seen = new Set();
   collectAllPolygons(function(poly) {
     if (!poly._ltoSetup) return;
+    if (seen.has(poly._leaflet_id)) return;
+    seen.add(poly._leaflet_id);
     try {
       if (!poly.getLatLngs || !poly.getLatLngs().length) return;
       var gj = poly.toGeoJSON();

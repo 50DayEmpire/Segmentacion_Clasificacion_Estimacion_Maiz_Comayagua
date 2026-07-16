@@ -6,7 +6,7 @@ from datetime import date, datetime, timedelta
 from scipy.optimize import curve_fit, least_squares
 
 from config import DURACION_CICLO
-from utils.conexionDB import get_connection_raw
+from utils.conexionDB import get_connection_raw, get_db_path
 
 _log_pred = logging.getLogger("seed_historico_offline")
 
@@ -613,6 +613,14 @@ def ejecutar_prediccion_ventana(
     from pipeline.ingesta import cargar_clima_desde_bd
     from pipeline.modulo_vpm import calcular_biomasa_y_rendimiento, calcular_gpp_vpm
 
+    # Asegurar columnas del clasificador Mahalanobis en BD
+    try:
+        from utils.db import _migrar_columnas_mahalanobis
+        with closing(get_connection_raw()) as _conn_mig:
+            _migrar_columnas_mahalanobis(_conn_mig)
+    except Exception:
+        pass
+
     id_ciclo   = ciclo["id_ciclo"]
     id_parcela = ciclo["id_parcela"]
     fecha_inicio_str = str(ciclo.get("fecha_inicio", ""))
@@ -779,32 +787,49 @@ def ejecutar_prediccion_ventana(
     area_ha = _obtener_area_ha(id_parcela)
     yield_qq_parcela = yield_qq_ha * area_ha if area_ha else None
 
-    # ── Clasificación fenológica ──────────────────────────────────────────────
+    # ── Clasificación fenológica (Mahalanobis) ──────────────────────────────
     score_pearson_val = None
     score_pend_val = None
     score_comp_val = None
     cultivo_label = None
+    res_clf = {}
 
-    if clasificar:
+    if clasificar and ventana in ("T1", "T2"):
         try:
-            from pipeline.modulo_clasificacion import clasificar_parcela_actual
+            from pipeline.modulo_clasificacion import evaluar_tipicidad_robusta
             with closing(get_connection_raw()) as conn_clf:
-                res_clf = clasificar_parcela_actual(
-                    conn_clf, id_parcela, sos_ts, dfs_vpm["EVI"],
-                    fecha_evaluacion=pd.Timestamp(fecha_ventana),
+                res_clf = evaluar_tipicidad_robusta(
+                    id_parcela, sos_ts,
+                    dia_objetivo=int((pd.Timestamp(fecha_ventana) - sos_ts).days),
+                    df_evi=dfs_vpm["EVI"], df_lswi=dfs_vpm["LSWI"],
+                    conn=conn_clf, version_perfil=1, dia_minimo_aceptable=20,
                 )
-            if res_clf["estado"] == "evaluado":
-                score_pearson_val = float(res_clf["r_forma"])
-                score_pend_val = float(res_clf["pendiente_obs"])
-                score_comp_val = float(res_clf["score_compuesto"])
             _log_pred.debug(
-                "[CLF] ciclo=%d ventana=%s pearson=%.4f pend=%.4f score=%.1f",
+                "[MAHAL_DBG] ciclo=%d ventana=%s estado=%s dia_efectivo=%s gap=%s dist=%s bd=%s",
                 id_ciclo, ventana,
-                score_pearson_val or 0, score_pend_val or 0, score_comp_val or 0,
+                res_clf.get("estado"),
+                res_clf.get("dia_efectivo"),
+                res_clf.get("gap_dias"),
+                res_clf.get("distancia_mahalanobis"),
+                get_db_path().name,
+            )
+            if res_clf["estado"] == "ok" and res_clf.get("distancia_mahalanobis") is not None:
+                dist = res_clf["distancia_mahalanobis"]
+                score_comp_val = max(0.0, min(100.0, 100.0 - dist * 12.0))
+                from pipeline.modulo_clasificacion import _distancia_a_label
+                cultivo_label = _distancia_a_label(dist)
+            _log_pred.debug(
+                "[MAHAL] ciclo=%d ventana=%s distancia=%.4f score=%.1f label=%s",
+                id_ciclo, ventana,
+                res_clf.get("distancia_mahalanobis") or 0,
+                score_comp_val or 0, cultivo_label or "N/A",
             )
         except Exception as exc:
-            _log_pred.warning("[CLF] Error clasificando ciclo %s ventana %s: %s",
+            _log_pred.warning("[MAHAL] Error clasificando ciclo %s ventana %s: %s",
                               id_ciclo, ventana, exc)
+    elif clasificar:
+        _log_pred.debug("[MAHAL] ciclo=%d ventana=%s: clasificación omitida (solo T1/T2)",
+                        id_ciclo, ventana)
 
     id_prediccion = None
     if persistir:
@@ -820,8 +845,8 @@ def ejecutar_prediccion_ventana(
                 lswi_max_efectivo_usado = excluded.lswi_max_efectivo_usado,
                 gpp_acumulado = excluded.gpp_acumulado,
                 npp_acumulado = excluded.npp_acumulado,
-                rendimiento_estimado_qq_ha = excluded.rendimiento_estimado_qq_ha,
-                rendimiento_estimado_qq_parcela = excluded.rendimiento_estimado_qq_parcela,
+                rendimiento_estimado_qq_ha = COALESCE(rendimiento_estimado_qq_ha, excluded.rendimiento_estimado_qq_ha),
+                rendimiento_estimado_qq_parcela = COALESCE(rendimiento_estimado_qq_parcela, excluded.rendimiento_estimado_qq_parcela),
                 score_pearson = COALESCE(excluded.score_pearson, score_pearson),
                 score_magnitud_pendiente = COALESCE(excluded.score_magnitud_pendiente, score_magnitud_pendiente),
                 score_compuesto = COALESCE(excluded.score_compuesto, score_compuesto),
@@ -839,24 +864,16 @@ def ejecutar_prediccion_ventana(
                 if cur.rowcount > 0:
                     id_prediccion = cur.lastrowid
 
-        if clasificar:
+        if clasificar and ventana in ("T1", "T2") and cultivo_label is not None:
             try:
-                from pipeline.modulo_clasificacion import persistir_clasificacion_v2
+                from pipeline.modulo_clasificacion import persistir_clasificacion_mahalanobis
                 with closing(get_connection_raw()) as conn_per:
-                    persistir_clasificacion_v2(
-                        conn_per,
-                        {"estado": "evaluado" if score_comp_val is not None else "sin_datos",
-                         "score_compuesto": score_comp_val,
-                         "r_forma": score_pearson_val,
-                         "pendiente_obs": score_pend_val,
-                         "dia_post_sos": int((pd.Timestamp(fecha_ventana) - sos_ts).days),
-                         "patron_usado": None,
-                         "id_parcela": id_parcela},
-                        id_ciclo,
-                        ventana=ventana,
+                    persistir_clasificacion_mahalanobis(
+                        conn_per, res_clf, id_ciclo,
+                        ventana=ventana, label=cultivo_label,
                     )
             except Exception as exc:
-                _log_pred.warning("[CLF] Error persistiendo clasificación ciclo %s: %s",
+                _log_pred.warning("[MAHAL] Error persistiendo clasificación ciclo %s: %s",
                                   id_ciclo, exc)
 
         if id_prediccion is not None:

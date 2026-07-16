@@ -27,8 +27,7 @@ pg = st.navigation(
         "Observatorio Regional": [
             st.Page("pages/1_Parcelas.py",         title="Observatorio",      icon="🗺️", default=True),
             st.Page("pages/2_Series_Temporales.py", title="Series Temporales", icon="📈"),
-            st.Page("pages/3_Estimacion.py",        title="Estimación",        icon="⚖️"),
-            st.Page("pages/4_Resumen_Valle.py",     title="Resumen Valle",     icon="📊"),
+            st.Page("pages/4_Resumen_Valle.py",     title="Resumen",           icon="📊"),
         ],
         "Análisis Histórico": [
             st.Page("pages/6_Analisis_Historico.py", title="Análisis Histórico", icon="📅"),

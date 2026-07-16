@@ -92,9 +92,14 @@ CRS_GEOGRAFICO = "EPSG:4326"
 
 # ── Referencia SAG/CAN (qq/ha por ciclo) ──────────────────────────────────────
 RENDIMIENTO_REF = {
-    "primera":  45.0,
-    "postrera": 38.0,
+    "primera":  64.35,
+    "postrera": 64.35,
 }
+
+# ── Umbrales clasificador Mahalanobis ───────────────────────────────────────────
+# Distancia de Mahalanobis: a menor distancia, más parecido a maíz.
+MAHALANOBIS_UMBRAL_MAIZ = 2.5   # distancia <= este valor → "Maíz"
+MAHALANOBIS_UMBRAL_BAJA = 4.0   # distancia <= este valor → "Maíz - baja probabilidad"
 
 # ── Métricas de validación a mostrar ──────────────────────────────────────────
 METRICAS_VALIDACION = ["RMSE", "MAE", "MAPE", "R²"]

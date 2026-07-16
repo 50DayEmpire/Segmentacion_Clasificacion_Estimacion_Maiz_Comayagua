@@ -4,7 +4,7 @@
   "temporada_activa": "primera",
   "factor_sos": 0.2,
   "clasificar": false,
-  "ultima_ejecucion": "2026-07-14T22:24:02.658480",
-  "ultima_ejecucion_exitosa": "2026-07-14T22:27:43.639096+00:00",
-  "proxima_ejecucion": "2026-07-14T16:30:00"
+  "ultima_ejecucion": "2026-07-16T21:11:50.027117",
+  "ultima_ejecucion_exitosa": "2026-07-16T21:13:39.729271+00:00",
+  "proxima_ejecucion": "2026-07-16T16:30:00"
 }
