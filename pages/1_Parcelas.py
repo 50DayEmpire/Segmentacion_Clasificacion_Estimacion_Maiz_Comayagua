@@ -11,9 +11,9 @@ from config import DIAS_VENTANAS, DURACION_MAX_CICLO
 from utils.conexionDB import get_connection_raw
 
 # ── Título ─────────────────────────────────────────────────────────────────────
-st.markdown("## 🗺️ Parcelas")
+st.markdown("## 🗺️ Observatorio")
 st.markdown(
-    "Mapa interactivo de parcelas agrícolas segmentadas en el Valle de Comayagua. "
+    "Mapa interactivo de parcelas agrícolas en el Valle de Comayagua. "
     "Colorea por **cultivo clasificado** o por **rendimiento estimado** (qq/ha)."
 )
 st.divider()
