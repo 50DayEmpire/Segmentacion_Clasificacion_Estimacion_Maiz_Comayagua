@@ -305,7 +305,7 @@ def calcular_biomasa_y_rendimiento(
     df_gpp_recortado: pd.DataFrame,
     cue: float = 0.5, #Zhang 2009
     fraccion_carbono: float = 0.45, #IPCC 1997
-    harvest_index: float = 0.48 #Estimación inicial razonable para Maíz (C4) en Comayagua
+    harvest_index: float = 0.61 #Estimación inicial para Maíz (C4) en Comayagua
 ) -> dict:
     """
     Calcula la Productividad Primaria Neta (NPP), la dinámica de acumulación

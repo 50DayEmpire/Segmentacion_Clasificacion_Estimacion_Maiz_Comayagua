@@ -83,23 +83,6 @@ from pipeline.modulo_predictivo import (
 )
 from config import DIAS_VENTANAS
 
-# ── Defaults del modelo VPM ───────────────────────────────────────────────────
-_VPM_DEFAULTS: dict = {
-    "epsilon_0":    1.6,
-    "t_min":        10.0,
-    "t_opt":        30.0,
-    "t_max":        45.0,
-    "par_fraction": 0.48,
-}
-
-# ── Defaults de conversión a rendimiento ─────────────────────────────────────
-_RENDIMIENTO_DEFAULTS: dict = {
-    "cue":               0.55,
-    "fraccion_carbono":  0.45,
-    "harvest_index":     0.48,
-}
-
-
 # =============================================================================
 # FUNCIÓN PRIVADA — núcleo fenológico compartido por los tres flujos
 # =============================================================================
@@ -139,7 +122,7 @@ def _calcular_fenologia_y_rendimiento(
         - "fenologia"  : pd.DataFrame — tabla SOS/POS por parcela.
         - "rendimiento": dict — salida de ``calcular_biomasa_y_rendimiento``.
     """
-    cfg_rend        = {**_RENDIMIENTO_DEFAULTS, **(config_rendimiento or {})}
+    cfg_rend        = config_rendimiento or {}
     df_evi          = dfs_vpm["EVI"]
     df_gpp          = dfs_gpp["GPP"]
     fecha_inicio_ts = pd.Timestamp(fecha_inicio)
@@ -284,7 +267,7 @@ def ejecutar_pipeline_completo(
         - "fenologia"      : pd.DataFrame
         - "rendimiento"    : dict
     """
-    cfg_vpm    = {**_VPM_DEFAULTS, **(config_vpm or {})}
+    cfg_vpm    = config_vpm or {}
     conn_clima = connection_fed if connection_fed is not None else connection
 
     if connection_fed is None:
@@ -419,7 +402,7 @@ def ejecutar_pipeline_desde_bd(
     ValueError
         Si el rango solicitado no está cubierto en BD para índices o clima.
     """
-    cfg_vpm = {**_VPM_DEFAULTS, **(config_vpm or {})}
+    cfg_vpm = config_vpm or {}
 
     print("=" * 60)
     print("🗄️  MOTOR DE PREDICCIÓN VPM — PIPELINE DESDE BD")
@@ -541,7 +524,7 @@ def calcular_rendimiento_desde_indices(
         - "fenologia"   : pd.DataFrame
         - "rendimiento" : dict
     """
-    cfg_vpm = {**_VPM_DEFAULTS, **(config_vpm or {})}
+    cfg_vpm = config_vpm or {}
 
     if fecha_inicio is None:
         fecha_inicio = str(dfs_crudos["EVI"].index.min().date())
