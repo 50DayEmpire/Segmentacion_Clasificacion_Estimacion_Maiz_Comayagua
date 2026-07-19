@@ -463,8 +463,8 @@ def cargar_indices_desde_bd(
     n_fechas  = len(df_evi)
     n_parcelas = len(df_evi.columns)
     print(
-        f"✅  Índices cargados desde BD: {n_fechas} fechas × {n_parcelas} parcelas "
-        f"({df_raw['fecha'].min().date()} → {df_raw['fecha'].max().date()})."
+        f"OK  Indices cargados desde BD: {n_fechas} fechas x {n_parcelas} parcelas "
+        f"({df_raw['fecha'].min().date()} -> {df_raw['fecha'].max().date()})."
     )
 
     return {"EVI": df_evi, "LSWI": df_lswi}
@@ -573,8 +573,8 @@ def cargar_clima_desde_bd(
     n_fechas   = len(df_temp)
     n_parcelas = len(df_temp.columns)
     print(
-        f"✅  Clima cargado desde BD: {n_fechas} fechas × {n_parcelas} parcelas "
-        f"({df_raw['fecha'].min().date()} → {df_raw['fecha'].max().date()})."
+        f"OK  Clima cargado desde BD: {n_fechas} fechas x {n_parcelas} parcelas "
+        f"({df_raw['fecha'].min().date()} -> {df_raw['fecha'].max().date()})."
     )
 
     return {

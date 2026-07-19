@@ -76,7 +76,7 @@ def preprocesar_indices_vpm(
     df_lswi_diario = dfs_diarios_limpios["LSWI"]
 
     # ── 4. Cálculo de W_scalar y FPAR ─────────────────────────────────────────
-    print("\n🌾 Calculando FPAR y Factor de Estrés Hídrico Diario (W_scalar)...")
+    print("\nCalculando FPAR y Factor de Estres Hidrico Diario (W_scalar)...")
 
     # Obtención de LSWI_max (máximo histórico por parcela)
     if lswi_max is None:
@@ -93,10 +93,10 @@ def preprocesar_indices_vpm(
     df_fpar = 1.0 * df_evi_diario
 
     num_parc = len(df_evi_diario.columns)
-    print("\n✅ Métricas base del VPM calculadas y consolidadas a nivel DIARIO:")
-    print(f"   ✔️ Total de Parcelas Procesadas: {num_parc}")
-    print(f"   ✔️ FPAR Diario (Máx Global): {df_fpar.max().max():.3f}")
-    print(f"   ✔️ W_scalar Diario (Mín/Máx Global): {df_w_scalar.min().min():.3f} / {df_w_scalar.max().max():.3f}")
+    print("\nOK Metricas base del VPM calculadas y consolidadas a nivel DIARIO:")
+    print(f"   - Total de Parcelas Procesadas: {num_parc}")
+    print(f"   - FPAR Diario (Max Global): {df_fpar.max().max():.3f}")
+    print(f"   - W_scalar Diario (Min/Max Global): {df_w_scalar.min().min():.3f} / {df_w_scalar.max().max():.3f}")
 
     return {
         "EVI": df_evi_diario,
@@ -232,7 +232,7 @@ def calcular_gpp_vpm(
                 f"rango de vegetación [{fpar_min.date()} a {fpar_max.date()}]."
             )
 
-        print("⚠️ Advertencia: Las fechas de clima y vegetación no coinciden exactamente. Aplicando reindexación 'nearest' como fallback.")
+        print("Advertencia: Las fechas de clima y vegetacion no coinciden exactamente. Aplicando reindexacion 'nearest' como fallback.")
         df_t2m_diario = df_t2m.reindex(df_fpar.index, method="nearest")
         df_ssrd_diario = df_ssrd.reindex(df_fpar.index, method="nearest")
     else:
@@ -287,11 +287,11 @@ def calcular_gpp_vpm(
     df_apar = df_fpar * df_par
     df_gpp = df_epsilon * df_apar  # g C / m² / día
 
-    print("\n✅ ¡Pipeline VPM DIARIO COMPLETADO EXITOSAMENTE!")
-    print(f"   ✔️ Horizonte temporal continuo evaluado: {df_gpp.shape[0]} días.")
-    print(f"   ✔️ Temperatura media registrada en la zona: {df_t2m_aligned.mean().mean():.2f} °C")
-    print(f"   ✔️ GPP Promedio diario del Maíz: {df_gpp.mean().mean():.3f} g C/m²/día")
-    print(f"   ✔️ GPP Máximo diario alcanzado: {df_gpp.max().max():.2f} g C/m²/día")
+    print("\nOK Pipeline VPM DIARIO COMPLETADO EXITOSAMENTE!")
+    print(f"   - Horizonte temporal continuo evaluado: {df_gpp.shape[0]} dias.")
+    print(f"   - Temperatura media registrada en la zona: {df_t2m_aligned.mean().mean():.2f} C")
+    print(f"   - GPP Promedio diario del Maiz: {df_gpp.mean().mean():.3f} g C/m2/dia")
+    print(f"   - GPP Maximo diario alcanzado: {df_gpp.max().max():.2f} g C/m2/dia")
 
     return {
         "PAR": df_par,

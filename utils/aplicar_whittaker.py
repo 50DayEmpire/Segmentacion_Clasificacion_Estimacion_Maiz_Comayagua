@@ -29,7 +29,7 @@ def aplicar_whittaker_series(
     dict_suavizado = {}
     
     for nombre_indice, df_crudo in diccionario_dfs.items():
-        print(f"📈 Suavizando serie temporal para: {nombre_indice}...")
+        print(f"Suavizando serie temporal para: {nombre_indice}...")
         
         df_resultado = df_crudo.copy()
         
@@ -45,7 +45,7 @@ def aplicar_whittaker_series(
             # de serie/pesos de la parcela, validando que existan suficientes datos.
             num_validos = np.sum(~np.isnan(serie_valores))
             if num_validos < (orden + 1):
-                print(f"⚠️ La parcela '{parcela}' tiene menos de {orden + 1} observaciones válidas ({num_validos}). Se aplica interpolación lineal.")
+                print(f"ATENCION: La parcela '{parcela}' tiene menos de {orden + 1} observaciones validas ({num_validos}). Se aplica interpolacion lineal.")
                 valores_suaves = pd.Series(serie_valores).interpolate(method="linear", limit_direction="both").fillna(0.0).values
             else:
                 try:
@@ -58,7 +58,7 @@ def aplicar_whittaker_series(
                     )
                     valores_suaves = whittaker.smooth(valores_preparados)
                 except Exception as e:
-                    print(f"⚠️ Whittaker falló para la parcela '{parcela}': {str(e)}. Se aplica interpolación lineal.")
+                    print(f"ATENCION: Whittaker fallo para la parcela '{parcela}': {str(e)}. Se aplica interpolacion lineal.")
                     valores_suaves = pd.Series(serie_valores).interpolate(method="linear", limit_direction="both").fillna(0.0).values
             
             df_resultado[parcela] = valores_suaves
