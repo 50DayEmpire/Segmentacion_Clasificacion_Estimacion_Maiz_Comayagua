@@ -199,22 +199,22 @@ def _crear_tablas_sql(conn: sqlite3.Connection) -> None:
                 ON DELETE CASCADE
         );
     """)
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS patron_referencia_fenologico (
-            id_patron         INTEGER NOT NULL,
-            subtipo           TEXT    NOT NULL,
-            dia_post_sos      INTEGER NOT NULL,
-            evi_promedio      REAL    NOT NULL,
-            evi_desviacion    REAL,
-            mediana_pendiente_verdeo REAL,
-            n_muestras        INTEGER NOT NULL,
-            ids_parcelas_usadas TEXT  NOT NULL, 
-            fecha_construccion TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-            version           INTEGER NOT NULL DEFAULT 1,
-            PRIMARY KEY (id_patron AUTOINCREMENT),
-            UNIQUE (subtipo, dia_post_sos, version)
-        );
-    """)
+    # conn.execute("""
+    #     CREATE TABLE IF NOT EXISTS patron_referencia_fenologico (
+    #         id_patron         INTEGER NOT NULL,
+    #         subtipo           TEXT    NOT NULL,
+    #         dia_post_sos      INTEGER NOT NULL,
+    #         evi_promedio      REAL    NOT NULL,
+    #         evi_desviacion    REAL,
+    #         mediana_pendiente_verdeo REAL,
+    #         n_muestras        INTEGER NOT NULL,
+    #         ids_parcelas_usadas TEXT  NOT NULL, 
+    #         fecha_construccion TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    #         version           INTEGER NOT NULL DEFAULT 1,
+    #         PRIMARY KEY (id_patron AUTOINCREMENT),
+    #         UNIQUE (subtipo, dia_post_sos, version)
+    #     );
+    # """)
     
     conn.execute("""
         CREATE TABLE IF NOT EXISTS perfil_tipicidad_maiz (
